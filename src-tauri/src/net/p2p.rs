@@ -99,13 +99,35 @@ impl P2pViewer {
 #[derive(Clone)]
 pub struct P2pHostManager {
     viewers: Arc<Mutex<HashMap<Uuid, P2pViewer>>>,
+    relay_candidates: Arc<Mutex<HashMap<Uuid, (String, Connection)>>>,
 }
 
 impl P2pHostManager {
     pub fn new() -> Self {
         Self {
             viewers: Arc::new(Mutex::new(HashMap::new())),
+            relay_candidates: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn register_relay(&self, peer_id: Uuid, ticket: String, conn: Connection) -> Vec<Connection> {
+        let mut rc = self.relay_candidates.lock();
+        let other_conns: Vec<Connection> = rc.iter().filter(|(id, _)| **id != peer_id).map(|(_, (_, c))| c.clone()).collect();
+        rc.insert(peer_id, (ticket, conn));
+        other_conns
+    }
+
+    pub fn unregister_relay(&self, peer_id: &Uuid) {
+        self.relay_candidates.lock().remove(peer_id);
+    }
+
+    pub fn get_other_relay_tickets(&self, exclude: &Uuid) -> Vec<String> {
+        self.relay_candidates
+            .lock()
+            .iter()
+            .filter(|(id, _)| *id != exclude)
+            .map(|(_, (t, _))| t.clone())
+            .collect()
     }
 
     pub fn add_viewer(&self, viewer: P2pViewer) {
@@ -154,6 +176,7 @@ impl P2pHostManager {
         ring: Arc<Mutex<RetransmitRing>>,
         keyframe_requester: Arc<dyn Fn() + Send + Sync>,
         nacks_served: Arc<std::sync::atomic::AtomicU64>,
+        on_telemetry: Arc<dyn Fn(TelemetryReport) + Send + Sync>,
         stop: Arc<AtomicBool>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
@@ -196,6 +219,7 @@ impl P2pHostManager {
                         let kf_req = keyframe_requester.clone();
                         let last_pli = last_pli.clone();
                         let pending_pli = pending_pli.clone();
+                        let on_telem = on_telemetry.clone();
                         let stop_viewer = stop.clone();
 
                         tokio::spawn(async move {
@@ -263,6 +287,7 @@ impl P2pHostManager {
 
                             // Tarefa B: Escuta de datagramas do espectador (NACKs e PLIs)
                             let conn_dg = conn.clone();
+                            let this_dg = this.clone();
                             let recv_dg_task = tokio::spawn(async move {
                                 while !stop_viewer.load(Ordering::SeqCst) {
                                     match conn_dg.read_datagram().await {
@@ -298,6 +323,28 @@ impl P2pHostManager {
                                                         } else {
                                                             pending_pli.store(true, Ordering::Relaxed);
                                                             tracing::debug!("p2p_host: PLI de {peer_id} agrupado (coalescing)");
+                                                        }
+                                                    }
+                                                    KIND_TELEMETRY => {
+                                                        if let Some(rep) = TelemetryReport::from_bytes(payload) {
+                                                            on_telem(rep);
+                                                        }
+                                                    }
+                                                    KIND_RELAY_ANNOUNCE => {
+                                                        if let Ok(ticket_str) = std::str::from_utf8(payload) {
+                                                            if ticket_str.starts_with("lk-") {
+                                                                let others = this_dg.register_relay(peer_id, ticket_str.to_string(), conn_dg.clone());
+                                                                tracing::info!("p2p_host: candidato mesh registrado para {peer_id} (outros ativos: {})", others.len());
+                                                                let fwd_pkt = control_packet(KIND_RELAY_ANNOUNCE, 0, ticket_str.as_bytes());
+                                                                let b_fwd = Bytes::from(fwd_pkt);
+                                                                for oc in &others {
+                                                                    let _ = oc.send_datagram(b_fwd.clone());
+                                                                }
+                                                                for ot in this_dg.get_other_relay_tickets(&peer_id) {
+                                                                    let fwd_back = control_packet(KIND_RELAY_ANNOUNCE, 0, ot.as_bytes());
+                                                                    let _ = conn_dg.send_datagram(Bytes::from(fwd_back));
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                     _ => {}
@@ -337,6 +384,7 @@ impl P2pHostManager {
                             send_task.abort();
                             recv_dg_task.abort();
                             this.remove_viewer(&peer_id);
+                            this.unregister_relay(&peer_id);
                             tracing::info!("p2p_host: espectador P2P desconectado: {nick} ({peer_id})");
                         });
                     }
@@ -453,6 +501,7 @@ mod tests {
             ring,
             Arc::new(|| {}),
             nacks,
+            Arc::new(|_| {}),
             stop.clone(),
         );
 

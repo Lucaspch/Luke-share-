@@ -89,7 +89,9 @@ $signatureContent = (Get-Content $setupSig -Raw).Trim()
 
 # 5. Prepara pasta release-dist
 $distDir = Join-Path $rootDir "release-dist"
-if (-not (Test-Path $distDir)) {
+if (Test-Path $distDir) {
+    Get-ChildItem -Path $distDir -File | Where-Object { $_.Name -like "*setup.exe*" -or $_.Name -like "*.sig" } | Remove-Item -Force -ErrorAction SilentlyContinue
+} else {
     New-Item -ItemType Directory -Path $distDir | Out-Null
 }
 
@@ -118,7 +120,9 @@ $latestManifest = @{
 }
 
 $latestJsonPath = Join-Path $distDir "latest.json"
-$latestManifest | ConvertTo-Json -Depth 5 | Set-Content $latestJsonPath -Encoding utf8
+$jsonStr = $latestManifest | ConvertTo-Json -Depth 5
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+[System.IO.File]::WriteAllText($latestJsonPath, $jsonStr, $utf8NoBom)
 
 # 7. Gera arquivo ZIP para distribuição direta
 $zipName = "Luke-Share-v${currentVer}-Windows.zip"
@@ -126,6 +130,7 @@ $zipPath = Join-Path $rootDir $zipName
 if (Test-Path $zipPath) {
     Remove-Item $zipPath -Force
 }
+Start-Sleep -Milliseconds 800
 Compress-Archive -Path "$distDir\*" -DestinationPath $zipPath -Force
 
 Write-Host ""

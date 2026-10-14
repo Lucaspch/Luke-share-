@@ -178,7 +178,7 @@ impl ReceiverPipeline {
                                 if from == remote_addr {
                                     if let Some((h, payload)) = MediaHeader::parse(&buf[..n]) {
                                         match h.kind {
-                                            KIND_VIDEO => {
+                                            KIND_VIDEO | KIND_FEC => {
                                                 let events = reassembler.push(&h, payload, now_ms);
                                                 for ev in events {
                                                     match ev {
@@ -239,7 +239,7 @@ impl ReceiverPipeline {
                         }
                     }
 
-                    // Telemetria periódica a cada 2 segundos enviada para a UI
+                    // Telemetria periódica a cada 2 segundos enviada para o anfitrião e para a UI
                     if last_telem.elapsed() >= Duration::from_millis(2000) {
                         let elapsed_sec = last_telem.elapsed().as_secs_f32();
                         last_telem = Instant::now();
@@ -261,11 +261,22 @@ impl ReceiverPipeline {
                             0.0
                         };
 
+                        // Envia relatório de telemetria de volta para o host (ajuste AIMD de bitrate)
+                        let telem_report = TelemetryReport {
+                            rtt_ms: stats.rtt_ms.max(1) as u16,
+                            loss_pct_x10: ((loss_pct * 10.0) as u16).min(1000),
+                            nacks_sent: (stats.nacks_sent as u16).min(u16::MAX),
+                            fec_recovered: (stats.fec_recovered as u16).min(u16::MAX),
+                        };
+                        let telem_pkt = control_packet(KIND_TELEMETRY, 0, &telem_report.to_bytes());
+                        let _ = std_sock.send_to(&telem_pkt, remote_addr);
+
                         sink_telem(StreamEvent::Telemetry {
                             rtt_ms: stats.rtt_ms.max(1),
                             packets_rx: stats.packets_rx,
                             loss_pct,
                             nacks_recovered: stats.nacks_recovered,
+                            fec_recovered: stats.fec_recovered,
                             dropped_ref: stats.dropped_ref_frames,
                             fps: effective_fps,
                         });
@@ -352,6 +363,12 @@ impl ReceiverPipeline {
         let pli_pkt = control_packet(KIND_PLI, 0, &[]);
         let _ = conn.send_datagram(Bytes::from(pli_pkt));
 
+        // Anuncia ticket local ao host para permitir Relé Mesh assistido entre espectadores
+        if let Ok(my_ticket) = RoomTicket::new(&endpoint.addr()) {
+            let announce_pkt = control_packet(KIND_RELAY_ANNOUNCE, 0, my_ticket.raw.as_bytes());
+            let _ = conn.send_datagram(Bytes::from(announce_pkt));
+        }
+
         // 4. Filas desacopladas para vídeo e áudio
         let (video_tx, video_rx) = crossbeam_channel::bounded::<(bool, u32, Vec<u8>)>(64);
         let (audio_tx, audio_rx) = crossbeam_channel::bounded::<Vec<u8>>(64);
@@ -423,10 +440,48 @@ impl ReceiverPipeline {
             }
         });
 
-        // --- Tarefa B: Loop de recepção e remontagem de Datagramas QUIC com Telemetria ---
+        // --- Tarefa D: Escuta e gerenciamento de conexões Mesh Relay locais ---
+        let mesh_peers: Arc<parking_lot::Mutex<Vec<iroh::endpoint::Connection>>> =
+            Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let (mesh_dg_tx, mut mesh_dg_rx) = tokio::sync::mpsc::channel::<Bytes>(256);
+
+        let ep_mesh_listener = endpoint.clone();
+        let mesh_peers_listener = mesh_peers.clone();
+        let stop_mesh = stop.clone();
+        let mesh_dg_tx_accept = mesh_dg_tx.clone();
+        let mesh_listener_task = tokio::spawn(async move {
+            while !stop_mesh.load(Ordering::SeqCst) {
+                tokio::select! {
+                    incoming = ep_mesh_listener.accept() => {
+                        let Some(incoming) = incoming else { break };
+                        if let Ok(peer_conn) = incoming.await {
+                            mesh_peers_listener.lock().push(peer_conn.clone());
+                            let tx_in = mesh_dg_tx_accept.clone();
+                            let st_p = stop_mesh.clone();
+                            tokio::spawn(async move {
+                                while !st_p.load(Ordering::SeqCst) {
+                                    match peer_conn.read_datagram().await {
+                                        Ok(dg) => {
+                                            let _ = tx_in.send(dg).await;
+                                        }
+                                        Err(_) => break,
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                }
+            }
+        });
+
+        // --- Tarefa B: Loop de recepção e remontagem de Datagramas QUIC com Telemetria e Relé Mesh ---
         let st_p2p = stop.clone();
         let sink_telem = event_sink.clone();
         let conn_rx = conn.clone();
+        let ep_mesh_conn = endpoint.clone();
+        let mesh_peers_fwd = mesh_peers.clone();
+        let mesh_dg_tx_mesh = mesh_dg_tx.clone();
         let p2p_task = tokio::spawn(async move {
             let mut reassembler = Reassembler::new();
             let mut opus_dec = match OpusDec::new() {
@@ -453,7 +508,7 @@ impl ReceiverPipeline {
                                 let now_ms = start_instant.elapsed().as_millis() as u64;
                                 if let Some((h, payload)) = MediaHeader::parse(&dg) {
                                     match h.kind {
-                                        KIND_VIDEO => {
+                                        KIND_VIDEO | KIND_FEC => {
                                             let events = reassembler.push(&h, payload, now_ms);
                                             for ev in events {
                                                 match ev {
@@ -470,6 +525,11 @@ impl ReceiverPipeline {
                                                     }
                                                 }
                                             }
+                                            // Relé Mesh Assistido: retransmite aos peers mesh conectados
+                                            let peers = mesh_peers_fwd.lock().clone();
+                                            for p in peers {
+                                                let _ = p.send_datagram(dg.clone());
+                                            }
                                         }
                                         KIND_AUDIO => {
                                             if let Some(dec) = &mut opus_dec {
@@ -480,6 +540,38 @@ impl ReceiverPipeline {
                                                     let _ = audio_tx.try_send(bytes.to_vec());
                                                 }
                                             }
+                                            let peers = mesh_peers_fwd.lock().clone();
+                                            for p in peers {
+                                                let _ = p.send_datagram(dg.clone());
+                                            }
+                                        }
+                                        KIND_RELAY_ANNOUNCE => {
+                                            if let Ok(ticket_str) = std::str::from_utf8(payload) {
+                                                if ticket_str.starts_with("lk-") {
+                                                    let ep_m = ep_mesh_conn.clone();
+                                                    let peers_m = mesh_peers_fwd.clone();
+                                                    let tx_m = mesh_dg_tx_mesh.clone();
+                                                    let st_m = st_p2p.clone();
+                                                    let t_str = ticket_str.to_string();
+                                                    tokio::spawn(async move {
+                                                        let ticket = RoomTicket { raw: t_str };
+                                                        if let Ok(target) = ticket.to_endpoint_addr() {
+                                                            if let Ok(peer_conn) = ep_m.connect(target, LUKE_SHARE_ALPN).await {
+                                                                tracing::info!("receiver_p2p: conectado ao peer mesh assistido!");
+                                                                peers_m.lock().push(peer_conn.clone());
+                                                                while !st_m.load(Ordering::SeqCst) {
+                                                                    match peer_conn.read_datagram().await {
+                                                                        Ok(dg) => {
+                                                                            let _ = tx_m.send(dg).await;
+                                                                        }
+                                                                        Err(_) => break,
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                            }
                                         }
                                         _ => {}
                                     }
@@ -488,6 +580,33 @@ impl ReceiverPipeline {
                             Err(_) => {
                                 tracing::info!("receiver_p2p: conexão de datagramas finalizada");
                                 break;
+                            }
+                        }
+                    }
+                    Some(mesh_dg) = mesh_dg_rx.recv() => {
+                        // Datagrama recebido de peer mesh assistido: alimenta o remontador sem reencaminhar
+                        let now_ms = start_instant.elapsed().as_millis() as u64;
+                        if let Some((h, payload)) = MediaHeader::parse(&mesh_dg) {
+                            match h.kind {
+                                KIND_VIDEO | KIND_FEC => {
+                                    let events = reassembler.push(&h, payload, now_ms);
+                                    for ev in events {
+                                        if let RxEvent::Frame { key, ts_90k, data, .. } = ev {
+                                            let _ = video_tx.try_send((key, ts_90k, data));
+                                        }
+                                    }
+                                }
+                                KIND_AUDIO => {
+                                    if let Some(dec) = &mut opus_dec {
+                                        if let Ok(pcm) = dec.decode(payload) {
+                                            let bytes: &[u8] = unsafe {
+                                                std::slice::from_raw_parts(pcm.as_ptr() as *const u8, pcm.len() * 4)
+                                            };
+                                            let _ = audio_tx.try_send(bytes.to_vec());
+                                        }
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -526,11 +645,22 @@ impl ReceiverPipeline {
                             0.0
                         };
 
+                        // Envia relatório de telemetria de volta para o host (ajuste AIMD de bitrate)
+                        let telem_report = TelemetryReport {
+                            rtt_ms: stats.rtt_ms.max(1) as u16,
+                            loss_pct_x10: ((loss_pct * 10.0) as u16).min(1000),
+                            nacks_sent: (stats.nacks_sent as u16).min(u16::MAX),
+                            fec_recovered: (stats.fec_recovered as u16).min(u16::MAX),
+                        };
+                        let telem_pkt = control_packet(KIND_TELEMETRY, 0, &telem_report.to_bytes());
+                        let _ = conn_rx.send_datagram(Bytes::from(telem_pkt));
+
                         sink_telem(StreamEvent::Telemetry {
                             rtt_ms: stats.rtt_ms.max(1),
                             packets_rx: stats.packets_rx,
                             loss_pct,
                             nacks_recovered: stats.nacks_recovered,
+                            fec_recovered: stats.fec_recovered,
                             dropped_ref: stats.dropped_ref_frames,
                             fps: effective_fps,
                         });
@@ -548,7 +678,7 @@ impl ReceiverPipeline {
             p2p_send_ctrl,
             remote_addr: None,
             threads: vec![dispatch_thread],
-            tasks: vec![ctrl_task, p2p_task],
+            tasks: vec![ctrl_task, p2p_task, mesh_listener_task],
         })
     }
 
@@ -614,6 +744,7 @@ mod tests {
                 pli_flag.store(true, Ordering::SeqCst);
             }),
             nacks,
+            Arc::new(|_| {}),
             stop.clone(),
         );
 

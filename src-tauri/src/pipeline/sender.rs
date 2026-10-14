@@ -18,7 +18,10 @@ use crate::capture::wgc::WgcCapture;
 use crate::net::p2p::{P2pHostManager, RoomTicket};
 use crate::net::protocol::*;
 use crate::net::session::ControlServer;
-use crate::net::transport::{packetize, parse_nack_payload, RetransmitRing};
+use crate::net::transport::{
+    generate_fec, packetize, parse_nack_payload, CongestionController, RetransmitRing,
+    DEFAULT_FEC_BLOCK_SIZE,
+};
 use crate::video::d3d::Gpu;
 use crate::video::encoder::{EncodedFrame, EncoderConfig, H264Encoder};
 use crate::video::resolution::{target_size, Preset};
@@ -143,6 +146,7 @@ impl SenderPipeline {
         audio_cap.set_muted(audio_muted);
 
         let ring = Arc::new(Mutex::new(RetransmitRing::new(512)));
+        let congestion_controller = Arc::new(Mutex::new(CongestionController::new(1_500_000, bitrate, bitrate)));
 
         // Inicializa gerenciador P2P Nativo Iroh se fornecido
         let (p2p_host, room_ticket) = if let Some(endpoint) = p2p_endpoint {
@@ -173,6 +177,16 @@ impl SenderPipeline {
                 enc_kf.request_keyframe();
             });
 
+            let cc_p2p = congestion_controller.clone();
+            let enc_p2p = encoder.clone();
+            let on_telemetry_p2p: Arc<dyn Fn(TelemetryReport) + Send + Sync> = Arc::new(move |rep| {
+                let loss = rep.loss_pct_x10 as f32 / 10.0;
+                let rtt = rep.rtt_ms as u32;
+                if let Some(new_br) = cc_p2p.lock().on_telemetry(rtt, loss) {
+                    enc_p2p.set_bitrate(new_br);
+                }
+            });
+
             host_mgr.clone().start_listener(
                 endpoint,
                 v_offer,
@@ -180,6 +194,7 @@ impl SenderPipeline {
                 ring.clone(),
                 kf_req,
                 nacks_served.clone(),
+                on_telemetry_p2p,
                 stop.clone(),
             );
 
@@ -211,6 +226,7 @@ impl SenderPipeline {
         // --- Thread 2: Video Packets -> Interleaved Round-Robin Dispatch (UDP + Iroh P2P) + Ring Buffer ---
         let st2 = stop.clone();
         let ring2 = ring.clone();
+        let cc2 = congestion_controller.clone();
         let ctrl2 = control_server.clone();
         let p2p_host_v = p2p_host.clone();
         let enc2 = encoder.clone();
@@ -254,6 +270,7 @@ impl SenderPipeline {
                         }
 
                         let packets = packetize(KIND_VIDEO, fid, ef.key, ts_90k, &ef.data);
+                        let fec_packets = generate_fec(fid, ef.key, ts_90k, &packets, DEFAULT_FEC_BLOCK_SIZE);
 
                         let udp_viewers = ctrl2.viewer_media_addrs();
                         let p2p_viewers = if let Some(ref host) = p2p_host_v {
@@ -271,8 +288,10 @@ impl SenderPipeline {
                         if total_viewers != last_viewers_cnt {
                             last_viewers_cnt = total_viewers;
                             let target_br = preset.adaptive_bitrate(total_viewers);
-                            enc2.set_bitrate(target_br);
-                            tracing::info!("sender: ajustando bitrate adaptativo para {target_br} bps ({total_viewers} espectadores)");
+                            cc2.lock().set_max_bitrate(target_br);
+                            let cur_br = cc2.lock().current_bitrate();
+                            enc2.set_bitrate(cur_br);
+                            tracing::info!("sender: ajustando teto do bitrate adaptativo para {target_br} bps (atual: {cur_br} bps, {total_viewers} espectadores)");
                         }
 
                         {
@@ -282,13 +301,26 @@ impl SenderPipeline {
                             }
                         }
 
+                        // Monta lista intercalando blocos de dados com pacotes de paridade FEC imediata
+                        let mut dispatch_list: Vec<&Vec<u8>> = Vec::with_capacity(packets.len() + fec_packets.len());
+                        let mut fec_idx = 0;
+                        for (i, p) in packets.iter().enumerate() {
+                            dispatch_list.push(p);
+                            if (i + 1) % DEFAULT_FEC_BLOCK_SIZE == 0 || i == packets.len() - 1 {
+                                if fec_idx < fec_packets.len() {
+                                    dispatch_list.push(&fec_packets[fec_idx]);
+                                    fec_idx += 1;
+                                }
+                            }
+                        }
+
                         // Intercalação + Rotação de peers (Round-Robin) para evitar viés de fila
                         let num_udp = udp_viewers.len();
                         let num_p2p = p2p_viewers.len();
                         let offset = (fid as usize) % total_viewers;
                         let mut bytes_in_burst = 0usize;
 
-                        for p in &packets {
+                        for p in dispatch_list {
                             let bytes_p2p = if num_p2p > 0 {
                                 Some(Bytes::copy_from_slice(p))
                             } else {
@@ -389,6 +421,7 @@ impl SenderPipeline {
         // --- Thread 4: UDP Listener for NACKs and PLIs com PLI Coalescing (250ms) ---
         let st4 = stop.clone();
         let ring4 = ring.clone();
+        let cc_udp = congestion_controller.clone();
         let enc4 = encoder.clone();
         let sock_rx = std_sock.try_clone()?;
         let nacks_cnt = nacks_served.clone();
@@ -436,6 +469,15 @@ impl SenderPipeline {
                                     } else {
                                         pending_pli = true;
                                         tracing::debug!("sender: PLI de {from_addr} agrupado (coalescing em janela de 250ms)");
+                                    }
+                                }
+                                KIND_TELEMETRY => {
+                                    if let Some(rep) = TelemetryReport::from_bytes(payload) {
+                                        let loss = rep.loss_pct_x10 as f32 / 10.0;
+                                        let rtt = rep.rtt_ms as u32;
+                                        if let Some(new_br) = cc_udp.lock().on_telemetry(rtt, loss) {
+                                            enc4.set_bitrate(new_br);
+                                        }
                                     }
                                 }
                                 KIND_HELLO => {

@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use super::protocol::*;
 
@@ -23,6 +24,78 @@ pub fn packetize(kind: u8, frame_id: u32, key: bool, ts_90k: u32, data: &[u8]) -
             v
         })
         .collect()
+}
+
+pub const DEFAULT_FEC_BLOCK_SIZE: usize = 8;
+pub const FEC_HEADER_BYTES: usize = 8; // start_idx (2B) + count (2B) + total_video_frags (2B) + last_frag_len (2B)
+
+/// Gera pacotes FEC de paridade XOR para os fragmentos de vídeo de um frame.
+/// Divide os fragmentos em blocos de até `block_size` fragmentos e calcula a paridade bit a bit.
+pub fn generate_fec(
+    frame_id: u32,
+    key: bool,
+    ts_90k: u32,
+    packets: &[Vec<u8>],
+    block_size: usize,
+) -> Vec<Vec<u8>> {
+    if packets.is_empty() {
+        return Vec::new();
+    }
+    let total_frags = packets.len();
+    let num_blocks = total_frags.div_ceil(block_size.max(1));
+    let mut fec_pkts = Vec::with_capacity(num_blocks);
+
+    for block_idx in 0..num_blocks {
+        let start = block_idx * block_size;
+        let end = (start + block_size).min(total_frags);
+        let count = (end - start) as u16;
+
+        let block_slices: Vec<&[u8]> = (start..end)
+            .map(|i| {
+                if packets[i].len() > HEADER_LEN {
+                    &packets[i][HEADER_LEN..]
+                } else {
+                    &[]
+                }
+            })
+            .collect();
+
+        let max_len = block_slices.iter().map(|s| s.len()).max().unwrap_or(0);
+        if max_len == 0 {
+            continue;
+        }
+
+        let mut parity = vec![0u8; max_len];
+        for slice in &block_slices {
+            for (k, &byte) in slice.iter().enumerate() {
+                parity[k] ^= byte;
+            }
+        }
+
+        let last_frag_len = block_slices.last().map(|s| s.len() as u16).unwrap_or(0);
+
+        let mut out = Vec::with_capacity(HEADER_LEN + FEC_HEADER_BYTES + max_len);
+        let flags = if key { FLAG_KEY } else { 0 };
+        MediaHeader {
+            kind: KIND_FEC,
+            flags,
+            frame_id,
+            frag_idx: block_idx as u16,
+            frag_cnt: num_blocks as u16,
+            ts_90k,
+        }
+        .write(&mut out);
+
+        out.extend_from_slice(&(start as u16).to_be_bytes());
+        out.extend_from_slice(&count.to_be_bytes());
+        out.extend_from_slice(&(total_frags as u16).to_be_bytes());
+        out.extend_from_slice(&last_frag_len.to_be_bytes());
+        out.extend_from_slice(&parity);
+
+        fec_pkts.push(out);
+    }
+
+    fec_pkts
 }
 
 /// Guarda os últimos N datagramas de vídeo enviados para atender NACKs.
@@ -46,6 +119,93 @@ impl RetransmitRing {
     }
 }
 
+/// Controlador de Congestionamento Adaptativo (AIMD) para taxa de bits do encoder.
+/// Reduz multiplicativamente sob congestionamento (perda > 2.5% ou RTT alto)
+/// e aumenta aditivamente quando o canal está estável.
+#[derive(Debug, Clone)]
+pub struct CongestionController {
+    min_bitrate: u32,
+    max_bitrate: u32,
+    current_bitrate: u32,
+    clean_ticks: u32,
+    last_decrease: Option<Instant>,
+}
+
+impl CongestionController {
+    pub fn new(min_bitrate: u32, max_bitrate: u32, initial_bitrate: u32) -> Self {
+        Self {
+            min_bitrate,
+            max_bitrate,
+            current_bitrate: initial_bitrate.clamp(min_bitrate, max_bitrate),
+            clean_ticks: 0,
+            last_decrease: None,
+        }
+    }
+
+    pub fn current_bitrate(&self) -> u32 {
+        self.current_bitrate
+    }
+
+    pub fn set_max_bitrate(&mut self, max: u32) {
+        self.max_bitrate = max;
+        if self.current_bitrate > self.max_bitrate {
+            self.current_bitrate = self.max_bitrate;
+        }
+    }
+
+    /// Processa telemetria recebida de um espectador.
+    /// Retorna `Some(new_bitrate)` se a taxa de bits foi alterada.
+    pub fn on_telemetry(&mut self, rtt_ms: u32, loss_pct: f32) -> Option<u32> {
+        let now = Instant::now();
+
+        // Condição de congestionamento: Perda > 2.5% ou RTT severo (> 250ms)
+        if loss_pct > 2.5 || rtt_ms > 250 {
+            if let Some(last) = self.last_decrease {
+                if now.duration_since(last) < Duration::from_millis(1500) {
+                    return None;
+                }
+            }
+
+            // Redução Multiplicativa (AIMD): 15% a 25% dependendo da gravidade
+            let factor = if loss_pct > 8.0 { 0.75 } else { 0.85 };
+            let new_br = ((self.current_bitrate as f32 * factor) as u32).max(self.min_bitrate);
+
+            self.clean_ticks = 0;
+            self.last_decrease = Some(now);
+
+            if new_br != self.current_bitrate {
+                tracing::info!(
+                    "congestion_control: AIMD decréscimo multiplicativo: perda={:.1}%, RTT={}ms -> {} -> {} bps",
+                    loss_pct, rtt_ms, self.current_bitrate, new_br
+                );
+                self.current_bitrate = new_br;
+                return Some(new_br);
+            }
+        } else if loss_pct <= 0.8 && rtt_ms <= 180 {
+            // Canal limpo: após 3 relatórios consecutivos (~4 a 6 segundos), aplica Aumento Aditivo
+            self.clean_ticks += 1;
+            if self.clean_ticks >= 3 && self.current_bitrate < self.max_bitrate {
+                self.clean_ticks = 0;
+                let step = 300_000; // +300 kbps
+                let new_br = (self.current_bitrate + step).min(self.max_bitrate);
+                if new_br != self.current_bitrate {
+                    tracing::info!(
+                        "congestion_control: AIMD acréscimo aditivo: canal estável -> {} -> {} bps",
+                        self.current_bitrate, new_br
+                    );
+                    self.current_bitrate = new_br;
+                    return Some(new_br);
+                }
+            }
+        } else {
+            // Zona neutra (0.8% a 2.5%): mantém taxa atual para evitar oscilações
+            self.clean_ticks = 0;
+        }
+
+        None
+    }
+}
+
 pub fn build_nack(frame_id: u32, missing: &[u16]) -> Vec<u8> {
     let mut payload = Vec::with_capacity(missing.len() * 2);
     for m in missing.iter().take(MAX_PAYLOAD / 2) {
@@ -65,6 +225,15 @@ pub enum RxEvent {
     RequestKey,
 }
 
+#[derive(Clone, Debug)]
+pub struct FecBlock {
+    pub start_idx: u16,
+    pub count: u16,
+    pub total_video_frags: u16,
+    pub last_frag_len: u16,
+    pub parity: Vec<u8>,
+}
+
 struct Partial {
     cnt: u16,
     frags: Vec<Option<Vec<u8>>>,
@@ -73,6 +242,7 @@ struct Partial {
     ts: u32,
     last_nack: u64,
     nacks: u8,
+    fec_blocks: Vec<FecBlock>,
 }
 
 impl Partial {
@@ -81,6 +251,56 @@ impl Partial {
     }
     fn missing(&self) -> Vec<u16> {
         self.frags.iter().enumerate().filter(|(_, f)| f.is_none()).map(|(i, _)| i as u16).collect()
+    }
+
+    /// Tenta recuperar fragmentos faltantes usando os blocos FEC acumulados.
+    /// Retorna o número de fragmentos reconstruídos com sucesso via XOR.
+    fn try_fec_recovery(&mut self) -> usize {
+        let mut recovered_count = 0;
+        let mut progress = true;
+
+        while progress {
+            progress = false;
+            for fec in &self.fec_blocks {
+                let start = fec.start_idx as usize;
+                let end = (fec.start_idx + fec.count) as usize;
+                if start >= self.frags.len() || end > self.frags.len() {
+                    continue;
+                }
+
+                let missing_in_block: Vec<usize> = (start..end)
+                    .filter(|&i| self.frags[i].is_none())
+                    .collect();
+
+                // Se falta exatamente 1 pacote neste bloco FEC, conseguimos reconstruí-lo instantaneamente!
+                if missing_in_block.len() == 1 {
+                    let missing_idx = missing_in_block[0];
+                    let expected_len = if missing_idx == (self.cnt as usize) - 1 {
+                        fec.last_frag_len as usize
+                    } else {
+                        MAX_PAYLOAD.min(fec.parity.len())
+                    };
+
+                    let mut recovered = fec.parity[..expected_len.min(fec.parity.len())].to_vec();
+                    for i in start..end {
+                        if i != missing_idx {
+                            if let Some(other_frag) = &self.frags[i] {
+                                for (k, &b) in other_frag.iter().take(recovered.len()).enumerate() {
+                                    recovered[k] ^= b;
+                                }
+                            }
+                        }
+                    }
+
+                    self.frags[missing_idx] = Some(recovered);
+                    self.got += 1;
+                    recovered_count += 1;
+                    progress = true; // Pode desbloquear a recuperação de outros blocos
+                }
+            }
+        }
+
+        recovered_count
     }
 }
 
@@ -101,6 +321,7 @@ pub struct Reassembler {
     pub packets_lost: u64,
     pub nacks_sent: u64,
     pub nacks_recovered: u64,
+    pub fec_recovered: u64,
     pub dropped_frames: u64,
     pub dropped_ref_frames: u64,
     pub frames_delivered: u64,
@@ -113,6 +334,7 @@ pub struct ReassemblerStats {
     pub packets_lost: u64,
     pub nacks_sent: u64,
     pub nacks_recovered: u64,
+    pub fec_recovered: u64,
     pub dropped_frames: u64,
     pub dropped_ref_frames: u64,
     pub frames_delivered: u64,
@@ -138,6 +360,7 @@ impl Reassembler {
             packets_lost: 0,
             nacks_sent: 0,
             nacks_recovered: 0,
+            fec_recovered: 0,
             dropped_frames: 0,
             dropped_ref_frames: 0,
             frames_delivered: 0,
@@ -152,7 +375,7 @@ impl Reassembler {
     pub fn push(&mut self, h: &MediaHeader, payload: &[u8], now_ms: u64) -> Vec<RxEvent> {
         self.packets_rx += 1;
         let mut ev = Vec::new();
-        if h.kind != KIND_VIDEO || h.frag_cnt == 0 || h.frag_idx >= h.frag_cnt {
+        if h.frag_cnt == 0 {
             return ev;
         }
         if let Some(next) = self.next_id {
@@ -164,6 +387,51 @@ impl Reassembler {
             self.dropped_ref_frames += 1;
             return ev; // sem referência: descarta silenciosamente para preservar decoder
         }
+
+        // --- Processamento de Pacotes FEC (Paridade para Recuperação Imediata) ---
+        if h.kind == KIND_FEC {
+            if payload.len() < FEC_HEADER_BYTES {
+                return ev;
+            }
+            let start_idx = u16::from_be_bytes([payload[0], payload[1]]);
+            let count = u16::from_be_bytes([payload[2], payload[3]]);
+            let total_video_frags = u16::from_be_bytes([payload[4], payload[5]]);
+            let last_frag_len = u16::from_be_bytes([payload[6], payload[7]]);
+            let parity = payload[FEC_HEADER_BYTES..].to_vec();
+
+            let p = self.frames.entry(h.frame_id).or_insert_with(|| Partial {
+                cnt: total_video_frags,
+                frags: vec![None; total_video_frags as usize],
+                got: 0,
+                key: h.is_key(),
+                ts: h.ts_90k,
+                last_nack: 0,
+                nacks: 0,
+                fec_blocks: Vec::new(),
+            });
+
+            if !p.fec_blocks.iter().any(|b| b.start_idx == start_idx && b.count == count) {
+                p.fec_blocks.push(FecBlock {
+                    start_idx,
+                    count,
+                    total_video_frags,
+                    last_frag_len,
+                    parity,
+                });
+                let rec = p.try_fec_recovery();
+                if rec > 0 {
+                    self.fec_recovered += rec as u64;
+                }
+            }
+            self.drain(now_ms, &mut ev);
+            return ev;
+        }
+
+        // --- Processamento de Fragmentos de Vídeo ---
+        if h.kind != KIND_VIDEO || h.frag_idx >= h.frag_cnt {
+            return ev;
+        }
+
         let p = self.frames.entry(h.frame_id).or_insert_with(|| Partial {
             cnt: h.frag_cnt,
             frags: vec![None; h.frag_cnt as usize],
@@ -172,6 +440,7 @@ impl Reassembler {
             ts: h.ts_90k,
             last_nack: 0,
             nacks: 0,
+            fec_blocks: Vec::new(),
         });
         if p.cnt != h.frag_cnt {
             return ev;
@@ -191,6 +460,11 @@ impl Reassembler {
             }
             *slot = Some(payload.to_vec());
             p.got += 1;
+
+            let rec = p.try_fec_recovery();
+            if rec > 0 {
+                self.fec_recovered += rec as u64;
+            }
         }
         self.drain(now_ms, &mut ev);
         ev
@@ -301,6 +575,7 @@ impl Reassembler {
             packets_lost: self.packets_lost,
             nacks_sent: self.nacks_sent,
             nacks_recovered: self.nacks_recovered,
+            fec_recovered: self.fec_recovered,
             dropped_frames: self.dropped_frames,
             dropped_ref_frames: self.dropped_ref_frames,
             frames_delivered: self.frames_delivered,
@@ -406,5 +681,61 @@ mod tests {
         let (h, pl) = MediaHeader::parse(&p).unwrap();
         assert_eq!((h.kind, h.frame_id), (KIND_NACK, 77));
         assert_eq!(parse_nack_payload(pl), vec![1, 5, 300]);
+    }
+
+    #[test]
+    fn fec_recovers_lost_fragment_instantly_without_nack() {
+        let mut r = Reassembler::new();
+        let d0 = data(100, 0);
+        let k = packetize(KIND_VIDEO, 1, true, 0, &d0);
+        assert_eq!(feed(&mut r, &k, 0).len(), 1);
+
+        // Frame 2 com 5000 bytes (5 fragmentos)
+        let d1 = data(5000, 7);
+        let p1 = packetize(KIND_VIDEO, 2, false, 0, &d1);
+        assert_eq!(p1.len(), 5);
+
+        // Gera pacotes FEC (1 bloco com os 5 fragmentos)
+        let fec = generate_fec(2, false, 0, &p1, 8);
+        assert_eq!(fec.len(), 1);
+
+        // Simula perda do fragmento 2 na rede (chegam 0, 1, 3, 4)
+        let lossy: Vec<Vec<u8>> = p1.iter().enumerate().filter(|(i, _)| *i != 2).map(|(_, p)| p.clone()).collect();
+        assert!(feed(&mut r, &lossy, 1).is_empty());
+
+        // Agora chega o pacote FEC: ele deve reconstruir o fragmento 2 em 0ms e entregar o frame!
+        let out = feed(&mut r, &fec, 2);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            RxEvent::Frame { frame_id, data, .. } => {
+                assert_eq!(*frame_id, 2);
+                assert_eq!(data, &d1);
+            }
+            _ => panic!("esperava entrega do frame via FEC"),
+        }
+        assert_eq!(r.stats().fec_recovered, 1);
+        assert_eq!(r.stats().nacks_sent, 0); // Zero NACKs disparados!
+    }
+
+    #[test]
+    fn congestion_controller_aimd_adjusts_bitrate() {
+        let mut cc = CongestionController::new(1_000_000, 10_000_000, 5_000_000);
+        assert_eq!(cc.current_bitrate(), 5_000_000);
+
+        // Perda alta (5.0%) -> Redução multiplicativa (15%)
+        let decreased = cc.on_telemetry(45, 5.0);
+        assert_eq!(decreased, Some(4_250_000));
+        assert_eq!(cc.current_bitrate(), 4_250_000);
+
+        // Chamada imediata (dentro do cooldown de 1.5s) não reduz novamente
+        assert_eq!(cc.on_telemetry(45, 5.0), None);
+
+        // Reset cooldown artificialmente recriando ou testando o aumento
+        let mut cc_stable = CongestionController::new(1_000_000, 5_000_000, 4_000_000);
+        assert_eq!(cc_stable.on_telemetry(25, 0.0), None); // tick 1
+        assert_eq!(cc_stable.on_telemetry(25, 0.0), None); // tick 2
+        let increased = cc_stable.on_telemetry(25, 0.0);   // tick 3 -> +300 kbps
+        assert_eq!(increased, Some(4_300_000));
+        assert_eq!(cc_stable.current_bitrate(), 4_300_000);
     }
 }

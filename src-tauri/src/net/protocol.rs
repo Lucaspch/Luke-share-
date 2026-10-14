@@ -76,9 +76,45 @@ pub const KIND_AUDIO: u8 = 2;
 pub const KIND_NACK: u8 = 3;
 pub const KIND_PLI: u8 = 4;
 pub const KIND_HELLO: u8 = 5; // viewer → sharer: abre o "furo" UDP e informa o endpoint de origem
+pub const KIND_FEC: u8 = 6;   // pacote de paridade Forward Error Correction (recuperação zero-RTT)
+pub const KIND_TELEMETRY: u8 = 7; // viewer → sharer: relatório periódico de RTT e perda para ABR
+pub const KIND_RELAY_ANNOUNCE: u8 = 8; // comunicação para topologia Mesh Relay entre viewers
 
 pub const FLAG_KEY: u8 = 0b01;
 pub const FLAG_LAST: u8 = 0b10;
+
+pub const FEC_HEADER_LEN: usize = 4; // start_idx (2B) + count (2B)
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct TelemetryReport {
+    pub rtt_ms: u16,
+    pub loss_pct_x10: u16, // 0..1000 representing 0.0% to 100.0%
+    pub nacks_sent: u16,
+    pub fec_recovered: u16,
+}
+
+impl TelemetryReport {
+    pub fn to_bytes(&self) -> [u8; 8] {
+        let mut b = [0u8; 8];
+        b[0..2].copy_from_slice(&self.rtt_ms.to_be_bytes());
+        b[2..4].copy_from_slice(&self.loss_pct_x10.to_be_bytes());
+        b[4..6].copy_from_slice(&self.nacks_sent.to_be_bytes());
+        b[6..8].copy_from_slice(&self.fec_recovered.to_be_bytes());
+        b
+    }
+
+    pub fn from_bytes(b: &[u8]) -> Option<Self> {
+        if b.len() < 8 {
+            return None;
+        }
+        Some(Self {
+            rtt_ms: u16::from_be_bytes(b[0..2].try_into().ok()?),
+            loss_pct_x10: u16::from_be_bytes(b[2..4].try_into().ok()?),
+            nacks_sent: u16::from_be_bytes(b[4..6].try_into().ok()?),
+            fec_recovered: u16::from_be_bytes(b[6..8].try_into().ok()?),
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MediaHeader {

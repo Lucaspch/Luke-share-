@@ -42,6 +42,8 @@ pub enum StreamEvent {
         packets_rx: u64,
         loss_pct: f32,
         nacks_recovered: u64,
+        #[serde(default)]
+        fec_recovered: u64,
         dropped_ref: u64,
         fps: u32,
     },

@@ -23,6 +23,7 @@ type StreamEvent =
       packets_rx: number;
       loss_pct: number;
       nacks_recovered: number;
+      fec_recovered?: number;
       dropped_ref: number;
       fps: number;
     }
@@ -264,7 +265,8 @@ class App {
             this.playerRttTag.textContent = `RTT: ${msg.rtt_ms}ms`;
           }
           if (this.playerLossTag) {
-            this.playerLossTag.textContent = `Perda: ${msg.loss_pct.toFixed(1)}% (NACKs: ${msg.nacks_recovered})`;
+            const fecInfo = (msg.fec_recovered && msg.fec_recovered > 0) ? ` • FEC: ${msg.fec_recovered}` : "";
+            this.playerLossTag.textContent = `Perda: ${msg.loss_pct.toFixed(1)}% (NACKs: ${msg.nacks_recovered}${fecInfo})`;
             if (msg.loss_pct > 2.0 || msg.dropped_ref > 0) {
               this.playerLossTag.classList.add("warning");
             } else {
