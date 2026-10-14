@@ -1,7 +1,7 @@
 param(
     [string]$Version = "",
     [string]$Notes = "Melhorias de desempenho e correcoes de estabilidade.",
-    [string]$Repo = "Lucaspch/Luke-share"
+    [string]$Repo = "Lucaspch/Luke-share-"
 )
 
 $ErrorActionPreference = "Stop"
