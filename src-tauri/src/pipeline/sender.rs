@@ -256,11 +256,16 @@ impl SenderPipeline {
         let preview_thread = std::thread::Builder::new()
             .name("sender-preview-dispatch".into())
             .spawn(move || {
+                let mut last_preview = std::time::Instant::now();
                 while !st_prev.load(Ordering::SeqCst) {
                     match preview_rx.recv_timeout(Duration::from_millis(50)) {
                         Ok((key, pts, data)) => {
-                            if let Some(ref sink) = prev_sink {
-                                sink(key, pts, data);
+                            // Sempre entrega keyframes instantâneos; delta frames limitados a ~35 FPS para o preview local
+                            if key || last_preview.elapsed() >= Duration::from_millis(28) {
+                                last_preview = std::time::Instant::now();
+                                if let Some(ref sink) = prev_sink {
+                                    sink(key, pts, data);
+                                }
                             }
                         }
                         Err(_) => {}

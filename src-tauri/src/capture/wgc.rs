@@ -111,17 +111,25 @@ impl WgcCapture {
             }
         };
         let size = item.Size()?;
+        let initial_size = match src {
+            SourceInfo::Monitor { width, height, .. } => (*width, *height),
+            SourceInfo::Window { .. } => (size.Width.max(2) as u32, size.Height.max(2) as u32),
+        };
+        let pool_size = SizeInt32 {
+            Width: initial_size.0 as i32,
+            Height: initial_size.1 as i32,
+        };
         let dxgi: IDXGIDevice = gpu.device.cast()?;
         let d3d_dev: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi)? }.cast()?;
         let format = DirectXPixelFormat::B8G8R8A8UIntNormalized;
-        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&d3d_dev, format, 3, size)?;
+        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&d3d_dev, format, 3, pool_size)?;
 
         let min_interval = if fps == 0 {
             0
         } else {
             10_000_000i64 / fps.max(1) as i64
         };
-        let state = Arc::new(Mutex::new(CbState { ring: None, last_size: size, last_pts: i64::MIN / 2 }));
+        let state = Arc::new(Mutex::new(CbState { ring: None, last_size: pool_size, last_pts: i64::MIN / 2 }));
         let gpu2 = gpu.clone();
         let dev2 = SendBox(d3d_dev.clone());
         let handler = TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(move |sender, _| {
@@ -179,7 +187,7 @@ impl WgcCapture {
             token,
             closed_token,
             closed,
-            initial_size: (size.Width.max(2) as u32, size.Height.max(2) as u32),
+            initial_size,
         })
     }
 }

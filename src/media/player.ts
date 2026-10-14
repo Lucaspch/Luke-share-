@@ -39,6 +39,7 @@ export class StreamPlayer {
   private lastFpsCalcTime = performance.now();
   private currentFps = 0;
   private hasFirstKeyFrame = false;
+  private hasFirstDecodedFrame = false;
   private currentCodec = "h264";
   private pipVideo: HTMLVideoElement | null = null;
   private isPiP = false;
@@ -86,23 +87,38 @@ export class StreamPlayer {
     }
 
     this.hasFirstKeyFrame = false;
+    this.hasFirstDecodedFrame = false;
     this.videoDecoder = new VideoDecoder({
       output: (frame: VideoFrame) => {
         if (this.overlay && !this.overlay.classList.contains("hidden")) {
           this.overlay.classList.add("hidden");
         }
 
-        const w = frame.displayWidth;
-        const h = frame.displayHeight;
-        if (this.canvas.width !== w || this.canvas.height !== h) {
-          this.canvas.width = w;
-          this.canvas.height = h;
+        const w = frame.displayWidth || frame.codedWidth || this.currentWidth;
+        const h = frame.displayHeight || frame.codedHeight || this.currentHeight;
+        if (w > 0 && h > 0) {
           this.currentWidth = w;
           this.currentHeight = h;
+          if (this.canvas.width !== w || this.canvas.height !== h) {
+            this.canvas.width = w;
+            this.canvas.height = h;
+          }
         }
 
-        this.ctx.drawImage(frame, 0, 0, w, h);
+        this.ctx.drawImage(frame, 0, 0, this.canvas.width, this.canvas.height);
         frame.close();
+
+        // Notifica estatísticas no primeiro frame para evitar '0x0'
+        if (!this.hasFirstDecodedFrame) {
+          this.hasFirstDecodedFrame = true;
+          if (this.statsCallback && this.currentWidth > 0 && this.currentHeight > 0) {
+            this.statsCallback({
+              width: this.currentWidth,
+              height: this.currentHeight,
+              fps: this.currentFps || 60,
+            });
+          }
+        }
 
         this.frameCount++;
         const now = performance.now();
@@ -128,6 +144,24 @@ export class StreamPlayer {
     this.configureDecoder(this.currentCodec);
   }
 
+  public setDimensions(width: number, height: number) {
+    if (width > 0) this.currentWidth = width;
+    if (height > 0) this.currentHeight = height;
+    if (this.canvas.width !== this.currentWidth || this.canvas.height !== this.currentHeight) {
+      if (this.currentWidth > 0 && this.currentHeight > 0) {
+        this.canvas.width = this.currentWidth;
+        this.canvas.height = this.currentHeight;
+      }
+    }
+    if (this.statsCallback && this.currentWidth > 0 && this.currentHeight > 0) {
+      this.statsCallback({
+        width: this.currentWidth,
+        height: this.currentHeight,
+        fps: this.currentFps,
+      });
+    }
+  }
+
   public configureDecoder(codecName?: string) {
     if (codecName) {
       this.currentCodec = codecName.toLowerCase().trim();
@@ -136,13 +170,11 @@ export class StreamPlayer {
 
     const candidates: string[] = [];
     if (this.currentCodec === "av1") {
-      candidates.push("av01.0.08M.08", "av01.0.05M.08", "avc1.640034");
+      candidates.push("av01.0.08M.08", "av01.0.05M.08", "av01.0.04M.08");
     } else if (this.currentCodec === "hevc" || this.currentCodec === "h265") {
-      candidates.push("hev1.1.6.L120.90", "hvc1.1.6.L120.90", "avc1.640034");
-    } else if (this.currentCodec === "auto") {
-      candidates.push("av01.0.08M.08", "hev1.1.6.L120.90", "avc1.640034", "avc1.64002a");
+      candidates.push("hev1.1.6.L120.90", "hev1.1.6.L93.B0", "hvc1.1.6.L120.90", "hvc1.1.6.L93.B0");
     } else {
-      candidates.push("avc1.640034", "avc1.64002a");
+      candidates.push("avc1.640034", "avc1.64002a", "avc1.4d4028", "avc1.42e01f");
     }
 
     let configured = false;

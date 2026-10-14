@@ -133,7 +133,7 @@ fn main() -> anyhow::Result<()> {
                     Ok(nv12) => {
                         let sub = encoder.submit(nv12, frame.pts_100ns);
                         if rx_count <= 3 {
-                            eprintln!("[VP] Frame {} recebido e submetido (submit={sub})", rx_count);
+                            eprintln!("[VP] Frame {} recebido ({}x{}) e submetido (submit={sub})", rx_count, frame.width, frame.height);
                         }
                     }
                     Err(e) => eprintln!("[VP] Erro no scaler: {e}"),

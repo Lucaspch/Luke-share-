@@ -156,9 +156,10 @@ pub async fn start_share(
 
     let bind_ip = Ipv4Addr::UNSPECIFIED;
 
+    let prev_chan = on_preview.clone();
     let preview_sink = Arc::new(move |key: bool, pts: u32, data: Vec<u8>| {
         let b64 = crate::pipeline::base64_encode(&data);
-        let _ = on_preview.send(StreamEvent::Video {
+        let _ = prev_chan.send(StreamEvent::Video {
             key,
             pts,
             data: b64,
@@ -224,6 +225,17 @@ pub async fn start_share(
         )
         .await
         .map_err(|e| format!("Erro iniciando servidor de controle TCP: {e:#}"))?;
+
+    // Envia evento de configuração inicial para a prévia local
+    let _ = on_preview.send(StreamEvent::Config {
+        width: out_res.0,
+        height: out_res.1,
+        fps: active_fps,
+        codec: active_codec.clone(),
+    });
+
+    // Solicita keyframe IDR imediato para que a prévia e espectadores iniciem sem atraso
+    sender.request_keyframe();
 
     *state.active_sender.lock() = Some(sender);
     state.local_peer.set_status(PeerStatus::Streaming);

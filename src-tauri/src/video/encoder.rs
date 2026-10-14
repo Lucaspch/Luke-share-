@@ -400,8 +400,8 @@ fn build_core(gpu: &Gpu, cfg: &EncoderConfig, allow_software: bool) -> Result<Co
         mgr.ResetDevice(&gpu.device, token)?;
 
         let candidates = match cfg.codec {
-            VideoCodec::Auto => vec![VideoCodec::Av1, VideoCodec::Hevc, VideoCodec::H264],
-            VideoCodec::Av1 => vec![VideoCodec::Av1, VideoCodec::Hevc, VideoCodec::H264],
+            VideoCodec::Auto => vec![VideoCodec::H264, VideoCodec::Hevc, VideoCodec::Av1],
+            VideoCodec::Av1 => vec![VideoCodec::Av1, VideoCodec::H264],
             VideoCodec::Hevc => vec![VideoCodec::Hevc, VideoCodec::H264],
             VideoCodec::H264 => vec![VideoCodec::H264],
         };

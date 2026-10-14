@@ -309,6 +309,9 @@ class App {
           this.player.handleAudioChunk(msg.d);
           break;
         case "config": {
+          if (msg.width && msg.height) {
+            this.player.setDimensions(msg.width, msg.height);
+          }
           if (msg.codec) {
             this.player.configureDecoder(msg.codec);
           }

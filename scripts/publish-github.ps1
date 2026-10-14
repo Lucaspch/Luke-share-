@@ -1,7 +1,9 @@
 param(
     [string]$Token = $env:GITHUB_TOKEN,
-    [string]$Tag = "v0.3.0",
-    [string]$Repo = "Lucaspch/Luke-share-"
+    [string]$Tag = "v0.3.1",
+    [string]$Repo = "Lucaspch/Luke-share-",
+    [string]$Title = "Luke-Share v0.3.1 - Correção 2K->1080p e Prévia ao Vivo",
+    [string]$Description = "### O que há de novo na v0.3.1:`n`n- **Correção de Enquadramento em Monitores 2K (2560x1440)**: O Scaler D3D11 agora se adapta dinamicamente à resolução real capturada na GPU, garantindo que toda a tela seja reduzida para 1080p sem cortar barras laterais ou inferiores.`n- **Correção da Prévia ao Vivo e Carregamento Infinito**: O modo Auto agora prioriza o H.264 de ultra-baixa latência por hardware, ativando instantaneamente a prévia no host e nos espectadores sem ficar em loop infinito.`n- **Métricas Imediatas**: O player WebCodecs não exibe mais '0x0' ao sincronizar com o stream."
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,8 +25,8 @@ try {
     Write-Host "Criando nova Release $Tag..." -ForegroundColor Yellow
     $body = @{
         tag_name   = $Tag
-        name       = "Luke-Share $Tag - Mini-Player, Interface Discord Dark, Codecs AV1/HEVC & Prévia"
-        body       = "### O que há de novo na ${Tag}:`n`n- **Picture-in-Picture (PiP) Nativo & Mini-Player**: Janela flutuante no canto da tela (Always on Top) para acompanhar a stream enquanto joga ou realiza outras tarefas.`n- **Interface Discord Dark**: Redesign visual completo com estética dark inspirada no Discord, contrastes aprimorados e listas de canais.`n- **Suporte a Codecs Modernos (AV1 e HEVC/H.265)**: Economia de 30% a 50% de bitrate com altíssima fidelidade para jogos rápidos, com fallback automático por hardware para H.264.`n- **Pré-visualização Antes de Iniciar**: Miniatura instantânea da fonte selecionada na interface antes de ligar a live."
+        name       = $Title
+        body       = $Description
         draft      = $false
         prerelease = $false
     } | ConvertTo-Json -Depth 5

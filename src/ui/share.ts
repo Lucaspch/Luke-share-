@@ -354,6 +354,13 @@ export class ShareManager {
         if (!this.previewPlayer) return;
         if (msg.t === "video") {
           this.previewPlayer.handleVideoFrame(msg.d, msg.k, msg.p);
+        } else if (msg.t === "config") {
+          if (msg.width && msg.height) {
+            this.previewPlayer.setDimensions(msg.width, msg.height);
+          }
+          if (msg.codec) {
+            this.previewPlayer.configureDecoder(msg.codec);
+          }
         }
       };
 
@@ -368,6 +375,15 @@ export class ShareManager {
         audioMuted: !audioEnabled,
         onPreview,
       });
+
+      if (this.previewPlayer) {
+        if (info.width && info.height) {
+          this.previewPlayer.setDimensions(info.width, info.height);
+        }
+        if (info.codec) {
+          this.previewPlayer.configureDecoder(info.codec);
+        }
+      }
 
       this.isSharing = true;
       this.isAudioMuted = !audioEnabled;
