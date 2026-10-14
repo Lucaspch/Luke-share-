@@ -27,6 +27,8 @@ pub enum StreamEvent {
         width: u32,
         height: u32,
         fps: u32,
+        #[serde(default = "default_codec_event")]
+        codec: String,
     },
     #[serde(rename = "audio_state")]
     AudioState {
@@ -47,6 +49,10 @@ pub enum StreamEvent {
         dropped_ref: u64,
         fps: u32,
     },
+}
+
+fn default_codec_event() -> String {
+    "h264".into()
 }
 
 /// Codificação Base64 eficiente sem alocações extras além da String de saída.

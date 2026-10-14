@@ -9,6 +9,7 @@ export interface ShareInfo {
   width: number;
   height: number;
   fps: number;
+  codec?: string;
   media_port: number;
   room_ticket?: string | null;
 }
@@ -29,6 +30,10 @@ export interface ShareManagerElements {
   resolutionSelect: HTMLSelectElement;
   fpsSelect?: HTMLSelectElement;
   bitrateSelect?: HTMLSelectElement;
+  codecSelect?: HTMLSelectElement;
+  sourcePreviewImg?: HTMLImageElement;
+  sourcePreviewPlaceholder?: HTMLElement;
+  btnRefreshPreview?: HTMLButtonElement;
   audioCheckbox: HTMLInputElement;
   btnStart: HTMLButtonElement;
   btnStop: HTMLButtonElement;
@@ -72,6 +77,10 @@ export class ShareManager {
   private roomTicketBox: HTMLElement | null = null;
   private shareTicketInput: HTMLInputElement | null = null;
   private btnCopyTicket: HTMLButtonElement | null = null;
+  private codecSelect: HTMLSelectElement | null = null;
+  private sourcePreviewImg: HTMLImageElement | null = null;
+  private sourcePreviewPlaceholder: HTMLElement | null = null;
+  private btnRefreshPreview: HTMLButtonElement | null = null;
   private currentRoomTicket: string | null = null;
 
   private currentSources: SourceInfo[] = [];
@@ -93,6 +102,10 @@ export class ShareManager {
     this.resolutionSelect = elements.resolutionSelect;
     this.fpsSelect = elements.fpsSelect || null;
     this.bitrateSelect = elements.bitrateSelect || null;
+    this.codecSelect = elements.codecSelect || null;
+    this.sourcePreviewImg = elements.sourcePreviewImg || null;
+    this.sourcePreviewPlaceholder = elements.sourcePreviewPlaceholder || null;
+    this.btnRefreshPreview = elements.btnRefreshPreview || null;
     this.audioCheckbox = elements.audioCheckbox;
     this.btnStart = elements.btnStart;
     this.btnStop = elements.btnStop;
@@ -157,6 +170,39 @@ export class ShareManager {
         }, 2000);
       });
     }
+
+    if (this.btnRefreshPreview) {
+      this.btnRefreshPreview.addEventListener("click", () => {
+        if (this.selectedSourceId !== null) {
+          this.updateSourceSnapshot(this.selectedSourceId);
+        }
+      });
+    }
+  }
+
+  public async updateSourceSnapshot(sourceId: number) {
+    if (!this.sourcePreviewImg) return;
+    try {
+      if (this.sourcePreviewPlaceholder) {
+        this.sourcePreviewPlaceholder.textContent = "Carregando miniatura...";
+        this.sourcePreviewPlaceholder.classList.remove("hidden");
+      }
+      const dataUrl = await invoke<string>("get_source_snapshot", { sourceId });
+      this.sourcePreviewImg.src = dataUrl;
+      this.sourcePreviewImg.classList.remove("hidden");
+      if (this.sourcePreviewPlaceholder) {
+        this.sourcePreviewPlaceholder.classList.add("hidden");
+      }
+    } catch (e) {
+      console.warn("Falha ao obter miniatura da fonte:", e);
+      if (this.sourcePreviewPlaceholder) {
+        this.sourcePreviewPlaceholder.textContent = "Prévia indisponível para esta fonte";
+        this.sourcePreviewPlaceholder.classList.remove("hidden");
+      }
+      if (this.sourcePreviewImg) {
+        this.sourcePreviewImg.classList.add("hidden");
+      }
+    }
   }
 
   private updateAudioTag() {
@@ -183,6 +229,10 @@ export class ShareManager {
         } else if (sources.length > 0) {
           this.selectedSourceId = sources[0].id;
         }
+      }
+
+      if (this.selectedSourceId !== null) {
+        this.updateSourceSnapshot(this.selectedSourceId);
       }
 
       this.renderSources();
@@ -236,6 +286,7 @@ export class ShareManager {
       card.addEventListener("click", () => {
         if (this.isSharing) return; // não troca em live sem reiniciar
         this.selectedSourceId = src.id;
+        this.updateSourceSnapshot(src.id);
         if (this.fpsSelect && src.refresh_rate) {
           const autoOpt = this.fpsSelect.querySelector('option[value="auto"]');
           if (autoOpt) {
@@ -306,11 +357,14 @@ export class ShareManager {
         }
       };
 
+      const codec = this.codecSelect ? this.codecSelect.value : "auto";
+
       const info = await invoke<ShareInfo>("start_share", {
         sourceId: this.selectedSourceId,
         presetStr: preset,
         fpsTarget,
         bitrateKbps,
+        codec,
         audioMuted: !audioEnabled,
         onPreview,
       });

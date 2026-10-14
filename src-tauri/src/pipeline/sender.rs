@@ -23,7 +23,7 @@ use crate::net::transport::{
     DEFAULT_FEC_BLOCK_SIZE,
 };
 use crate::video::d3d::Gpu;
-use crate::video::encoder::{EncodedFrame, EncoderConfig, H264Encoder};
+use crate::video::encoder::{EncodedFrame, EncoderConfig, H264Encoder, VideoCodec};
 use crate::video::resolution::{calculate_adaptive_bitrate, target_size, Preset};
 use crate::video::scaler::Scaler;
 
@@ -39,6 +39,7 @@ pub struct SenderPipeline {
     pub local_media_port: u16,
     pub out_resolution: (u32, u32),
     pub active_fps: u32,
+    pub active_codec: VideoCodec,
     pub packets_sent: Arc<std::sync::atomic::AtomicU64>,
     pub bytes_sent: Arc<std::sync::atomic::AtomicU64>,
     pub nacks_served: Arc<std::sync::atomic::AtomicU64>,
@@ -52,6 +53,7 @@ impl SenderPipeline {
         preset: Preset,
         fps_target: Option<u32>,
         custom_bitrate_kbps: Option<u32>,
+        codec_pref: Option<String>,
         audio_muted: bool,
         control_server: Arc<ControlServer>,
         preview_sink: Option<PreviewSink>,
@@ -118,11 +120,17 @@ impl SenderPipeline {
             base_bitrate
         };
 
+        let requested_codec = codec_pref
+            .as_deref()
+            .map(VideoCodec::from_str_loose)
+            .unwrap_or(VideoCodec::Auto);
+
         let enc_cfg = EncoderConfig {
             width: out_w,
             height: out_h,
             fps: effective_fps,
             bitrate,
+            codec: requested_codec,
         };
 
         let (enc_tx, enc_rx) = crossbeam_channel::bounded::<EncodedFrame>(32);
@@ -134,6 +142,7 @@ impl SenderPipeline {
                 let _ = enc_tx.try_send(ef);
             }),
         ).context("falha ao inicializar H264Encoder")?);
+        let active_codec = encoder.codec;
 
         // 4. Inicializa Captura de Áudio WASAPI com exclusão do Discord
         let (audio_tx, audio_rx) = crossbeam_channel::bounded::<Vec<f32>>(8);
@@ -172,6 +181,7 @@ impl SenderPipeline {
                 width: out_w,
                 height: out_h,
                 fps: effective_fps,
+                codec: active_codec.as_str().to_string(),
             };
             let a_offer = Some(AudioOffer {
                 sample_rate: 48000,
@@ -509,6 +519,7 @@ impl SenderPipeline {
             local_media_port,
             out_resolution: (out_w, out_h),
             active_fps: effective_fps,
+            active_codec,
             packets_sent,
             bytes_sent,
             nacks_served,

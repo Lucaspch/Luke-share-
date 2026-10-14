@@ -69,6 +69,7 @@ pub fn run() {
             list_peers,
             add_manual_peer,
             get_sources,
+            get_source_snapshot,
             start_share,
             stop_share,
             set_audio_muted,

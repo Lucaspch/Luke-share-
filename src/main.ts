@@ -1,4 +1,5 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { PeersManager } from "./ui/peers";
 import { ShareManager } from "./ui/share";
 import { StreamPlayer } from "./media/player";
@@ -15,7 +16,7 @@ interface MyInfo {
 type StreamEvent =
   | { t: "video"; k: boolean; p: number; d: string }
   | { t: "audio"; d: string }
-  | { t: "config"; width: number; height: number; fps: number }
+  | { t: "config"; width: number; height: number; fps: number; codec?: string }
   | { t: "audio_state"; enabled: boolean }
   | {
       t: "telemetry";
@@ -35,6 +36,7 @@ class App {
   private updaterManager!: UpdaterManager;
   private player: StreamPlayer | null = null;
   private myInfo: MyInfo | null = null;
+  private isMiniPlayer = false;
 
   // Header Elements
   private myIpEl = document.getElementById("my-ip") as HTMLElement;
@@ -51,6 +53,9 @@ class App {
   private watchMetaInfo = document.getElementById("watch-meta-info") as HTMLElement;
   private btnStopWatch = document.getElementById("btn-stop-watch") as HTMLButtonElement;
   private btnFullscreen = document.getElementById("btn-fullscreen") as HTMLButtonElement;
+  private btnPip = document.getElementById("btn-pip") as HTMLButtonElement | null;
+  private btnMiniPlayer = document.getElementById("btn-mini-player") as HTMLButtonElement | null;
+  private btnExitMiniPlayer = document.getElementById("btn-exit-mini-player") as HTMLButtonElement | null;
   private canvasContainer = document.getElementById("canvas-container") as HTMLElement;
   private streamCanvas = document.getElementById("stream-canvas") as HTMLCanvasElement;
   private playerOverlay = document.getElementById("player-overlay") as HTMLElement;
@@ -135,6 +140,10 @@ class App {
         resolutionSelect: document.getElementById("resolution-select") as HTMLSelectElement,
         fpsSelect: document.getElementById("fps-select") as HTMLSelectElement,
         bitrateSelect: document.getElementById("bitrate-select") as HTMLSelectElement,
+        codecSelect: document.getElementById("codec-select") as HTMLSelectElement,
+        sourcePreviewImg: document.getElementById("source-preview-img") as HTMLImageElement,
+        sourcePreviewPlaceholder: document.getElementById("source-preview-placeholder") as HTMLElement,
+        btnRefreshPreview: document.getElementById("btn-refresh-preview") as HTMLButtonElement,
         audioCheckbox: document.getElementById("audio-enable-checkbox") as HTMLInputElement,
         btnStart: document.getElementById("btn-start-share") as HTMLButtonElement,
         btnStop: document.getElementById("btn-stop-share") as HTMLButtonElement,
@@ -178,6 +187,49 @@ class App {
 
     // Desconectar do stream assistido
     this.btnStopWatch.addEventListener("click", () => this.stopWatching());
+
+    // Picture-in-Picture (Janela flutuante nativa do sistema)
+    if (this.btnPip) {
+      this.btnPip.addEventListener("click", async () => {
+        if (!this.player) return;
+        try {
+          const active = await this.player.togglePiP();
+          if (this.btnPip) {
+            this.btnPip.textContent = active ? "📌 Sair PiP" : "📌 PiP";
+          }
+        } catch (e) {
+          alert("Picture-in-Picture não suportado ou negado pelo sistema: " + e);
+        }
+      });
+    }
+
+    // Modo Mini-Player (Compacto & Always on Top)
+    const toggleMiniPlayer = async () => {
+      try {
+        const win = getCurrentWindow();
+        this.isMiniPlayer = !this.isMiniPlayer;
+        if (this.isMiniPlayer) {
+          document.body.classList.add("mini-player-active");
+          await win.setAlwaysOnTop(true);
+          await win.setSize(new LogicalSize(480, 290));
+          if (this.btnMiniPlayer) this.btnMiniPlayer.textContent = "🪟 Normal";
+        } else {
+          document.body.classList.remove("mini-player-active");
+          await win.setAlwaysOnTop(false);
+          await win.setSize(new LogicalSize(1100, 720));
+          if (this.btnMiniPlayer) this.btnMiniPlayer.textContent = "🪟 Mini-Player";
+        }
+      } catch (e) {
+        console.warn("Falha ao alternar modo Mini-Player:", e);
+      }
+    };
+
+    if (this.btnMiniPlayer) {
+      this.btnMiniPlayer.addEventListener("click", toggleMiniPlayer);
+    }
+    if (this.btnExitMiniPlayer) {
+      this.btnExitMiniPlayer.addEventListener("click", toggleMiniPlayer);
+    }
 
     // Tela cheia
     this.btnFullscreen.addEventListener("click", () => {
@@ -256,10 +308,15 @@ class App {
         case "audio":
           this.player.handleAudioChunk(msg.d);
           break;
-        case "config":
-          this.watchMetaInfo.textContent = `${displayAddr} • ${msg.width}x${msg.height} @ ${msg.fps} FPS`;
+        case "config": {
+          if (msg.codec) {
+            this.player.configureDecoder(msg.codec);
+          }
+          const codecBadge = (msg.codec || "H.264").toUpperCase();
+          this.watchMetaInfo.textContent = `${displayAddr} • ${msg.width}x${msg.height} @ ${msg.fps} FPS (${codecBadge})`;
           this.playerResTag.textContent = `${msg.width}x${msg.height}`;
           break;
+        }
         case "telemetry":
           this.playerFpsTag.textContent = `${msg.fps} FPS`;
           if (this.playerRttTag) {
@@ -299,6 +356,21 @@ class App {
     } catch (e) {
       console.warn("Erro ao desconectar:", e);
     } finally {
+      if (this.isMiniPlayer) {
+        this.isMiniPlayer = false;
+        document.body.classList.remove("mini-player-active");
+        try {
+          const win = getCurrentWindow();
+          await win.setAlwaysOnTop(false);
+          await win.setSize(new LogicalSize(1100, 720));
+        } catch (_) {}
+      }
+      if (this.btnPip) {
+        this.btnPip.textContent = "📌 PiP";
+      }
+      if (this.btnMiniPlayer) {
+        this.btnMiniPlayer.textContent = "🪟 Mini-Player";
+      }
       if (this.player) {
         this.player.destroy();
         this.player = null;

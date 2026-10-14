@@ -44,6 +44,7 @@ pub struct ShareInfo {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    pub codec: String,
     pub media_port: u16,
     pub room_ticket: Option<String>,
 }
@@ -84,6 +85,12 @@ pub fn get_sources() -> Result<Vec<SourceInfo>, String> {
     Ok(list_sources())
 }
 
+#[tauri::command]
+pub fn get_source_snapshot(source_id: isize) -> Result<String, String> {
+    crate::capture::sources::capture_source_snapshot(source_id)
+        .map_err(|e| format!("Falha ao capturar miniatura: {e:#}"))
+}
+
 #[derive(Serialize)]
 pub struct StreamStats {
     pub is_sharing: bool,
@@ -121,6 +128,7 @@ pub async fn start_share(
     preset_str: String,
     fps_target: Option<u32>,
     bitrate_kbps: Option<u32>,
+    codec: Option<String>,
     audio_muted: bool,
     on_preview: Channel<StreamEvent>,
 ) -> Result<ShareInfo, String> {
@@ -171,6 +179,7 @@ pub async fn start_share(
         preset,
         fps_target,
         bitrate_kbps,
+        codec,
         audio_muted,
         state.control_server.clone(),
         Some(preview_sink),
@@ -180,6 +189,7 @@ pub async fn start_share(
 
     let out_res = sender.out_resolution;
     let active_fps = sender.active_fps;
+    let active_codec = sender.active_codec.as_str().to_string();
     let media_port = sender.local_media_port;
     let room_ticket = sender.room_ticket.as_ref().map(|t| t.raw.clone());
 
@@ -188,6 +198,7 @@ pub async fn start_share(
         width: out_res.0,
         height: out_res.1,
         fps: active_fps,
+        codec: active_codec.clone(),
     };
     let a_offer = Some(AudioOffer {
         sample_rate: 48000,
@@ -221,6 +232,7 @@ pub async fn start_share(
         width: out_res.0,
         height: out_res.1,
         fps: active_fps,
+        codec: active_codec,
         media_port,
         room_ticket,
     })

@@ -37,24 +37,55 @@ pub const NAL_IDR: u8 = 5;
 pub const NAL_SPS: u8 = 7;
 pub const NAL_PPS: u8 = 8;
 
+pub const NAL_HEVC_VPS: u8 = 32;
+pub const NAL_HEVC_SPS: u8 = 33;
+pub const NAL_HEVC_PPS: u8 = 34;
+pub const NAL_HEVC_IDR_W_RADL: u8 = 19;
+pub const NAL_HEVC_IDR_N_LP: u8 = 20;
+pub const NAL_HEVC_CRA: u8 = 21;
+
+pub fn hevc_nal_type(nal: &[u8]) -> u8 {
+    nal.first().map(|b| (b >> 1) & 0x3F).unwrap_or(0)
+}
+
 pub fn has_nal(data: &[u8], t: u8) -> bool {
     nals(data).iter().any(|n| nal_type(n) == t)
 }
 
-/// Guarda SPS/PPS vistos e garante que todo keyframe os carregue (decoders novos precisam deles).
+/// Guarda VPS/SPS/PPS vistos e garante que todo keyframe os carregue (decoders novos precisam deles).
 #[derive(Default)]
 pub struct ParamSets {
+    vps: Option<Vec<u8>>,
     sps: Option<Vec<u8>>,
     pps: Option<Vec<u8>>,
+    is_hevc: bool,
 }
 
 impl ParamSets {
+    pub fn new(is_hevc: bool) -> Self {
+        Self {
+            vps: None,
+            sps: None,
+            pps: None,
+            is_hevc,
+        }
+    }
+
     pub fn set_from_annexb(&mut self, data: &[u8]) {
         for n in nals(data) {
-            match nal_type(n) {
-                NAL_SPS => self.sps = Some(n.to_vec()),
-                NAL_PPS => self.pps = Some(n.to_vec()),
-                _ => {}
+            if self.is_hevc {
+                match hevc_nal_type(n) {
+                    NAL_HEVC_VPS => self.vps = Some(n.to_vec()),
+                    NAL_HEVC_SPS => self.sps = Some(n.to_vec()),
+                    NAL_HEVC_PPS => self.pps = Some(n.to_vec()),
+                    _ => {}
+                }
+            } else {
+                match nal_type(n) {
+                    NAL_SPS => self.sps = Some(n.to_vec()),
+                    NAL_PPS => self.pps = Some(n.to_vec()),
+                    _ => {}
+                }
             }
         }
     }
@@ -62,16 +93,40 @@ impl ParamSets {
     /// Retorna o frame pronto para envio; em keyframes sem SPS/PPS, prefixa os guardados.
     pub fn ensure_in_keyframe(&mut self, frame: Vec<u8>) -> Vec<u8> {
         self.set_from_annexb(&frame);
-        let is_idr = has_nal(&frame, NAL_IDR);
-        if is_idr && !(has_nal(&frame, NAL_SPS) && has_nal(&frame, NAL_PPS)) {
-            if let (Some(s), Some(p)) = (&self.sps, &self.pps) {
-                let mut out = Vec::with_capacity(frame.len() + s.len() + p.len() + 8);
-                out.extend_from_slice(&[0, 0, 0, 1]);
-                out.extend_from_slice(s);
-                out.extend_from_slice(&[0, 0, 0, 1]);
-                out.extend_from_slice(p);
-                out.extend_from_slice(&frame);
-                return out;
+        if self.is_hevc {
+            let is_idr = nals(&frame).iter().any(|n| {
+                let t = hevc_nal_type(n);
+                t == NAL_HEVC_IDR_W_RADL || t == NAL_HEVC_IDR_N_LP || t == NAL_HEVC_CRA
+            });
+            let has_headers = nals(&frame).iter().any(|n| hevc_nal_type(n) == NAL_HEVC_VPS)
+                && nals(&frame).iter().any(|n| hevc_nal_type(n) == NAL_HEVC_SPS)
+                && nals(&frame).iter().any(|n| hevc_nal_type(n) == NAL_HEVC_PPS);
+
+            if is_idr && !has_headers {
+                if let (Some(v), Some(s), Some(p)) = (&self.vps, &self.sps, &self.pps) {
+                    let mut out = Vec::with_capacity(frame.len() + v.len() + s.len() + p.len() + 12);
+                    out.extend_from_slice(&[0, 0, 0, 1]);
+                    out.extend_from_slice(v);
+                    out.extend_from_slice(&[0, 0, 0, 1]);
+                    out.extend_from_slice(s);
+                    out.extend_from_slice(&[0, 0, 0, 1]);
+                    out.extend_from_slice(p);
+                    out.extend_from_slice(&frame);
+                    return out;
+                }
+            }
+        } else {
+            let is_idr = has_nal(&frame, NAL_IDR);
+            if is_idr && !(has_nal(&frame, NAL_SPS) && has_nal(&frame, NAL_PPS)) {
+                if let (Some(s), Some(p)) = (&self.sps, &self.pps) {
+                    let mut out = Vec::with_capacity(frame.len() + s.len() + p.len() + 8);
+                    out.extend_from_slice(&[0, 0, 0, 1]);
+                    out.extend_from_slice(s);
+                    out.extend_from_slice(&[0, 0, 0, 1]);
+                    out.extend_from_slice(p);
+                    out.extend_from_slice(&frame);
+                    return out;
+                }
             }
         }
         frame

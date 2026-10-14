@@ -1,6 +1,6 @@
 param(
     [string]$Token = $env:GITHUB_TOKEN,
-    [string]$Tag = "v0.2.2",
+    [string]$Tag = "v0.3.0",
     [string]$Repo = "Lucaspch/Luke-share-"
 )
 
@@ -23,8 +23,8 @@ try {
     Write-Host "Criando nova Release $Tag..." -ForegroundColor Yellow
     $body = @{
         tag_name   = $Tag
-        name       = "Luke-Share $Tag - Ultra Bitrate & Qualidade de Imagem para Jogos"
-        body       = "### O que há de novo na ${Tag}:`n`n- **Otimização de Bitrate para Jogos**: Aumento da taxa de bits padrão de 4.5 Mbps para até 20 Mbps (Ultra Gaming), eliminando artefatos de compressão e quadriculado em jogos rápidos (Forza Horizon, simuladores e shooters).`n- **Novo Seletor de Bitrate na Interface**: Escolha entre Auto (Recomendado), Ultra Gaming (20 Mbps), Alta (14 Mbps), Equilibrada (8 Mbps) ou Econômica (4 Mbps).`n- **Correção de Falso-Positivo de Perda de Pacotes**: Corrigido bug onde o handshake inicial registrava falsamente perda de rede e derrubava o bitrate para 1.5 Mbps.`n- **Recuperação Acelerada de Congestionamento (AIMD)**: Rampa de bitrate mais rápida para conexões estáveis.`n- **Ajustes de Alta Fidelidade no Media Foundation**: Margem de pico de 25% para cenas com muito movimento."
+        name       = "Luke-Share $Tag - Mini-Player, Interface Discord Dark, Codecs AV1/HEVC & Prévia"
+        body       = "### O que há de novo na ${Tag}:`n`n- **Picture-in-Picture (PiP) Nativo & Mini-Player**: Janela flutuante no canto da tela (Always on Top) para acompanhar a stream enquanto joga ou realiza outras tarefas.`n- **Interface Discord Dark**: Redesign visual completo com estética dark inspirada no Discord, contrastes aprimorados e listas de canais.`n- **Suporte a Codecs Modernos (AV1 e HEVC/H.265)**: Economia de 30% a 50% de bitrate com altíssima fidelidade para jogos rápidos, com fallback automático por hardware para H.264.`n- **Pré-visualização Antes de Iniciar**: Miniatura instantânea da fonte selecionada na interface antes de ligar a live."
         draft      = $false
         prerelease = $false
     } | ConvertTo-Json -Depth 5
@@ -39,12 +39,13 @@ $uploadBase = "https://uploads.github.com/repos/$Repo/releases/$releaseId/assets
 # 2. Arquivos para upload
 $rootDir = Split-Path -Parent $PSScriptRoot
 $distDir = Join-Path $rootDir "release-dist"
+$cleanVer = $Tag.TrimStart('v')
 
 $filesToUpload = @(
-    @{ Path = Join-Path $distDir "Luke-Share_0.2.2_x64-setup.exe"; Name = "Luke-Share_0.2.2_x64-setup.exe"; ContentType = "application/vnd.microsoft.portable-executable" },
-    @{ Path = Join-Path $distDir "Luke-Share_0.2.2_x64-setup.exe.sig"; Name = "Luke-Share_0.2.2_x64-setup.exe.sig"; ContentType = "text/plain" },
+    @{ Path = Join-Path $distDir "Luke-Share_${cleanVer}_x64-setup.exe"; Name = "Luke-Share_${cleanVer}_x64-setup.exe"; ContentType = "application/vnd.microsoft.portable-executable" },
+    @{ Path = Join-Path $distDir "Luke-Share_${cleanVer}_x64-setup.exe.sig"; Name = "Luke-Share_${cleanVer}_x64-setup.exe.sig"; ContentType = "text/plain" },
     @{ Path = Join-Path $distDir "latest.json"; Name = "latest.json"; ContentType = "application/json" },
-    @{ Path = Join-Path $rootDir "Luke-Share-v0.2.2-Windows.zip"; Name = "Luke-Share-v0.2.2-Windows.zip"; ContentType = "application/zip" }
+    @{ Path = Join-Path $rootDir "Luke-Share-v${cleanVer}-Windows.zip"; Name = "Luke-Share-v${cleanVer}-Windows.zip"; ContentType = "application/zip" }
 )
 
 # 3. Lista assets existentes para deletar duplicados se houver

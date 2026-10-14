@@ -77,6 +77,7 @@ impl ReceiverPipeline {
                     width: offer.width,
                     height: offer.height,
                     fps: offer.fps,
+                    codec: offer.codec.clone(),
                 });
             }),
             Arc::new(move |enabled| {
@@ -100,6 +101,7 @@ impl ReceiverPipeline {
             width: initial_video.width,
             height: initial_video.height,
             fps: initial_video.fps,
+            codec: initial_video.codec.clone(),
         });
 
         // 4. Filas desacopladas para que a recepção de pacotes UDP nunca bloqueie no IPC
@@ -352,6 +354,7 @@ impl ReceiverPipeline {
             width: initial_video.width,
             height: initial_video.height,
             fps: initial_video.fps,
+            codec: initial_video.codec.clone(),
         });
 
         // Mantém a stream de envio de controle viva durante toda a sessão
@@ -422,6 +425,7 @@ impl ReceiverPipeline {
                             width: video.width,
                             height: video.height,
                             fps: video.fps,
+                            codec: video.codec.clone(),
                         });
                     }
                     Ok(Control::AudioState { enabled }) => {
@@ -737,7 +741,7 @@ mod tests {
 
         host_mgr.clone().start_listener(
             host_ep,
-            VideoOffer { width: 1920, height: 1080, fps: 60 },
+            VideoOffer { width: 1920, height: 1080, fps: 60, codec: "h264".into() },
             None,
             ring.clone(),
             Arc::new(move || {

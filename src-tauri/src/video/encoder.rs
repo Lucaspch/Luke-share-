@@ -18,8 +18,13 @@ use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{CoTaskMemFree, CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
 
+use serde::{Deserialize, Serialize};
+
 use super::d3d::Gpu;
-use super::h264::{has_nal, ParamSets, NAL_IDR};
+use super::h264::{
+    has_nal, hevc_nal_type, nals, ParamSets, NAL_HEVC_CRA, NAL_HEVC_IDR_N_LP, NAL_HEVC_IDR_W_RADL,
+    NAL_IDR,
+};
 
 fn var_bool(b: bool) -> VARIANT {
     let mut v = VARIANT::default();
@@ -43,12 +48,42 @@ fn var_u32(n: u32) -> VARIANT {
     v
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VideoCodec {
+    #[default]
+    Auto,
+    Av1,
+    Hevc,
+    H264,
+}
+
+impl VideoCodec {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            VideoCodec::Auto => "auto",
+            VideoCodec::Av1 => "av1",
+            VideoCodec::Hevc => "hevc",
+            VideoCodec::H264 => "h264",
+        }
+    }
+
+    pub fn from_str_loose(s: &str) -> Self {
+        match s.to_lowercase().trim() {
+            "av1" => VideoCodec::Av1,
+            "hevc" | "h265" | "h.265" => VideoCodec::Hevc,
+            "h264" | "avc" | "h.264" => VideoCodec::H264,
+            _ => VideoCodec::Auto,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct EncoderConfig {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
     pub bitrate: u32,
+    pub codec: VideoCodec,
 }
 
 pub struct EncodedFrame {
@@ -72,6 +107,7 @@ pub struct H264Encoder {
     /// Nome amigável do MFT escolhido (ex.: "NVIDIA H.264 Encoder MFT").
     pub name: String,
     pub hardware: bool,
+    pub codec: VideoCodec,
 }
 
 fn pack(hi: u32, lo: u32) -> u64 {
@@ -89,10 +125,18 @@ struct Core {
     staging: Option<ID3D11Texture2D>,
     provides_samples: bool,
     out_size: u32,
+    actual_codec: VideoCodec,
 }
 
 impl Core {
-    fn new_with(activate: &IMFActivate, hardware: bool, mgr: &IMFDXGIDeviceManager, gpu: &Gpu, cfg: &EncoderConfig) -> Result<Core> {
+    fn new_with(
+        activate: &IMFActivate,
+        hardware: bool,
+        mgr: &IMFDXGIDeviceManager,
+        gpu: &Gpu,
+        cfg: &EncoderConfig,
+        actual_codec: VideoCodec,
+    ) -> Result<Core> {
         unsafe {
             let name = {
                 let mut p = windows::core::PWSTR::null();
@@ -103,7 +147,7 @@ impl Core {
                         CoTaskMemFree(Some(p.0 as *const _));
                         s
                     }
-                    Err(_) => "H.264 Encoder".into(),
+                    Err(_) => format!("{:?} Encoder", actual_codec),
                 }
             };
             let t: IMFTransform = activate.ActivateObject().context("ActivateObject")?;
@@ -120,16 +164,27 @@ impl Core {
                 t.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, mgr.as_raw() as usize).context("SET_D3D_MANAGER")?;
             }
 
-            // --- tipo de saída (H.264) ---
+            // --- tipo de saída (H.264, HEVC ou AV1) ---
             let ot = MFCreateMediaType()?;
             ot.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-            ot.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
+            match actual_codec {
+                VideoCodec::H264 => {
+                    ot.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
+                    let _ = ot.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32);
+                }
+                VideoCodec::Hevc => {
+                    ot.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_HEVC)?;
+                }
+                VideoCodec::Av1 => {
+                    ot.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_AV1)?;
+                }
+                VideoCodec::Auto => unreachable!(),
+            }
             ot.SetUINT32(&MF_MT_AVG_BITRATE, cfg.bitrate)?;
             ot.SetUINT64(&MF_MT_FRAME_SIZE, pack(cfg.width, cfg.height))?;
             ot.SetUINT64(&MF_MT_FRAME_RATE, pack(cfg.fps, 1))?;
             ot.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack(1, 1))?;
             ot.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
-            ot.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32)?;
             t.SetOutputType(0, &ot, 0).context("SetOutputType")?;
 
             // --- tipo de entrada (NV12, BT.709 limitado) ---
@@ -182,6 +237,7 @@ impl Core {
                 staging: None,
                 provides_samples: provides,
                 out_size: info.cbSize.max(1 << 20),
+                actual_codec,
             })
         }
     }
@@ -307,10 +363,16 @@ impl Core {
     }
 }
 
-fn enumerate(hardware: bool) -> Vec<IMFActivate> {
+fn enumerate(hardware: bool, codec: VideoCodec) -> Vec<IMFActivate> {
     unsafe {
+        let subtype = match codec {
+            VideoCodec::H264 => MFVideoFormat_H264,
+            VideoCodec::Hevc => MFVideoFormat_HEVC,
+            VideoCodec::Av1 => MFVideoFormat_AV1,
+            VideoCodec::Auto => MFVideoFormat_H264,
+        };
         let in_info = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_NV12 };
-        let out_info = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_H264 };
+        let out_info = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: subtype };
         let kind = if hardware { MFT_ENUM_FLAG_HARDWARE.0 } else { MFT_ENUM_FLAG_SYNCMFT.0 };
         let flags = MFT_ENUM_FLAG(kind | MFT_ENUM_FLAG_SORTANDFILTER.0);
         let mut pp: *mut Option<IMFActivate> = std::ptr::null_mut();
@@ -336,22 +398,34 @@ fn build_core(gpu: &Gpu, cfg: &EncoderConfig, allow_software: bool) -> Result<Co
         MFCreateDXGIDeviceManager(&mut token, &mut mgr)?;
         let mgr = mgr.ok_or_else(|| anyhow!("IMFDXGIDeviceManager nulo"))?;
         mgr.ResetDevice(&gpu.device, token)?;
+
+        let candidates = match cfg.codec {
+            VideoCodec::Auto => vec![VideoCodec::Av1, VideoCodec::Hevc, VideoCodec::H264],
+            VideoCodec::Av1 => vec![VideoCodec::Av1, VideoCodec::Hevc, VideoCodec::H264],
+            VideoCodec::Hevc => vec![VideoCodec::Hevc, VideoCodec::H264],
+            VideoCodec::H264 => vec![VideoCodec::H264],
+        };
+
         let mut errs = Vec::new();
-        for a in enumerate(true) {
-            match Core::new_with(&a, true, &mgr, gpu, cfg) {
-                Ok(c) => return Ok(c),
-                Err(e) => errs.push(format!("hw: {e:#}")),
-            }
-        }
-        if allow_software {
-            for a in enumerate(false) {
-                match Core::new_with(&a, false, &mgr, gpu, cfg) {
+        for &codec in &candidates {
+            for a in enumerate(true, codec) {
+                match Core::new_with(&a, true, &mgr, gpu, cfg, codec) {
                     Ok(c) => return Ok(c),
-                    Err(e) => errs.push(format!("sw: {e:#}")),
+                    Err(e) => errs.push(format!("hw ({codec:?}): {e:#}")),
                 }
             }
         }
-        Err(anyhow!("nenhum encoder H.264 utilizável: {}", errs.join(" | ")))
+        if allow_software {
+            for &codec in &candidates {
+                for a in enumerate(false, codec) {
+                    match Core::new_with(&a, false, &mgr, gpu, cfg, codec) {
+                        Ok(c) => return Ok(c),
+                        Err(e) => errs.push(format!("sw ({codec:?}): {e:#}")),
+                    }
+                }
+            }
+        }
+        Err(anyhow!("nenhum encoder de vídeo utilizável: {}", errs.join(" | ")))
     }
 }
 
@@ -367,14 +441,15 @@ impl H264Encoder {
         let force_key = Arc::new(AtomicBool::new(true));
         let new_bitrate = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let stop = Arc::new(AtomicBool::new(false));
-        let (ready_tx, ready_rx) = bounded::<Result<(String, bool), String>>(1);
+        let (ready_tx, ready_rx) = bounded::<Result<(String, bool, VideoCodec), String>>(1);
         let (fk, nb, st, gpu2) = (force_key.clone(), new_bitrate.clone(), stop.clone(), gpu.clone());
-        let thread = std::thread::Builder::new().name("h264-encoder".into()).spawn(move || unsafe {
+        let thread = std::thread::Builder::new().name("video-encoder".into()).spawn(move || unsafe {
             let com = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
             let _ = MFStartup(MF_VERSION, MFSTARTUP_FULL);
             match build_core(&gpu2, &cfg, allow_software) {
                 Ok(mut core) => {
-                    let _ = ready_tx.send(Ok((core.name.clone(), core.hardware)));
+                    let actual_codec = core.actual_codec;
+                    let _ = ready_tx.send(Ok((core.name.clone(), core.hardware, actual_codec)));
                     run_loop(&mut core, &rx, &fk, &nb, &st, &mut on_frame);
                     let _ = core.t.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
                     let _ = core.t.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
@@ -389,7 +464,7 @@ impl H264Encoder {
             }
         })?;
         match ready_rx.recv_timeout(Duration::from_secs(10)) {
-            Ok(Ok((name, hardware))) => Ok(Self { tx, force_key, new_bitrate, stop, thread: Some(thread), name, hardware }),
+            Ok(Ok((name, hardware, codec))) => Ok(Self { tx, force_key, new_bitrate, stop, thread: Some(thread), name, hardware, codec }),
             Ok(Err(e)) => Err(anyhow!(e)),
             Err(_) => Err(anyhow!("timeout iniciando o encoder")),
         }
@@ -424,8 +499,20 @@ impl Drop for H264Encoder {
 fn emit(core: &mut Core, params: &mut ParamSets, on_frame: &mut (dyn FnMut(EncodedFrame) + Send)) -> Result<bool> {
     match core.process_output()? {
         Some((data, clean, pts)) => {
-            let key = clean || has_nal(&data, NAL_IDR);
-            let data = if key { params.ensure_in_keyframe(data) } else { data };
+            let key = clean || match core.actual_codec {
+                VideoCodec::H264 => has_nal(&data, NAL_IDR),
+                VideoCodec::Hevc => nals(&data).iter().any(|n| {
+                    let t = hevc_nal_type(n);
+                    t == NAL_HEVC_IDR_W_RADL || t == NAL_HEVC_IDR_N_LP || t == NAL_HEVC_CRA
+                }),
+                VideoCodec::Av1 => clean,
+                VideoCodec::Auto => clean,
+            };
+            let data = if key && core.actual_codec != VideoCodec::Av1 {
+                params.ensure_in_keyframe(data)
+            } else {
+                data
+            };
             on_frame(EncodedFrame { data, key, pts_100ns: pts });
             Ok(true)
         }
@@ -441,7 +528,7 @@ fn run_loop(
     stop: &AtomicBool,
     on_frame: &mut (dyn FnMut(EncodedFrame) + Send),
 ) {
-    let mut params = ParamSets::default();
+    let mut params = ParamSets::new(core.actual_codec == VideoCodec::Hevc);
     let evgen: Option<IMFMediaEventGenerator> = if core.async_mft { core.t.cast().ok() } else { None };
     let mut need_input = 0u32;
     let mut pts_base: Option<i64> = None;
@@ -516,5 +603,17 @@ fn run_loop(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_codecs_constants() {
+        let _ = MFVideoFormat_H264;
+        let _ = MFVideoFormat_HEVC;
+        let _ = MFVideoFormat_AV1;
     }
 }

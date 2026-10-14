@@ -17,7 +17,7 @@
               <circle cx="8" cy="10" r="1" fill="currentColor" />
             </svg>
             <span class="logo-text">Luke-Share</span>
-            <span class="version-tag">v0.2.2</span>
+            <span class="version-tag">v0.3.0</span>
             <button id="btn-check-updates" class="btn-check-update" title="Verificar se há atualizações">
               <span>🔄 Atualizações</span>
               <span id="update-badge" class="update-badge-dot hidden"></span>
@@ -136,9 +136,36 @@
                 <div class="loading-sources">Carregando telas e janelas...</div>
               </div>
 
+              <!-- Pré-visualização Instantânea da Fonte Selecionada -->
+              <div class="source-preview-card" id="source-preview-card">
+                <div class="source-preview-header">
+                  <div class="preview-header-left">
+                    <span class="preview-dot"></span>
+                    <span class="preview-title">Prévia da Captura (Antes de Iniciar)</span>
+                  </div>
+                  <button id="btn-refresh-preview" class="btn-secondary btn-sm" title="Capturar nova miniatura">🔄 Atualizar Prévia</button>
+                </div>
+                <div class="source-preview-body">
+                  <img id="source-preview-img" class="source-preview-img hidden" alt="Miniatura da tela/janela" />
+                  <div id="source-preview-placeholder" class="source-preview-placeholder">
+                    <span>🖥️ Selecione um monitor ou janela acima para visualizar a prévia instantânea</span>
+                  </div>
+                </div>
+              </div>
+
               <!-- Controles de Configuração -->
               <div class="share-controls-card">
                 <div class="control-row">
+                  <div class="control-group">
+                    <label for="codec-select">Codec de Vídeo:</label>
+                    <select id="codec-select">
+                      <option value="auto" selected>⚡ Auto (Prioriza Hardware AV1/HEVC/H.264)</option>
+                      <option value="av1">🚀 AV1 (Máxima Eficiência • Menos Bitrate)</option>
+                      <option value="hevc">✨ HEVC / H.265 (Alta Fidelidade)</option>
+                      <option value="h264">🛡️ H.264 / AVC (Universal • Baixa Latência)</option>
+                    </select>
+                  </div>
+
                   <div class="control-group">
                     <label for="resolution-select">Qualidade / Resolução:</label>
                     <select id="resolution-select">
@@ -204,6 +231,8 @@
                 <span class="watch-meta" id="watch-meta-info">Conectando...</span>
               </div>
               <div class="watch-actions">
+                <button id="btn-pip" class="btn-secondary btn-sm" title="Picture-in-Picture (Janela Flutuante do Windows)">📌 PiP</button>
+                <button id="btn-mini-player" class="btn-secondary btn-sm" title="Modo Mini-Player Flutuante (Sempre no Topo)">🪟 Mini-Player</button>
                 <button id="btn-fullscreen" class="btn-secondary btn-sm" title="Tela Cheia">⛶ Tela Cheia</button>
                 <button id="btn-stop-watch" class="btn-danger btn-sm">Desconectar</button>
               </div>
@@ -214,6 +243,9 @@
               <div id="player-overlay" class="player-overlay">
                 <div class="spinner"></div>
                 <div class="overlay-text">Aguardando sinal de vídeo...</div>
+              </div>
+              <div class="mini-player-overlay" id="mini-player-overlay">
+                <button id="btn-exit-mini-player" class="btn-mini-restore" title="Restaurar janela completa">⤢ Restaurar Janela</button>
               </div>
             </div>
 

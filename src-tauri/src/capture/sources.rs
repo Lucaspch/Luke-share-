@@ -179,4 +179,114 @@ mod win {
         unsafe { GetWindowThreadProcessId(HWND(hwnd as *mut _), Some(&mut pid)) };
         pid
     }
+
+    /// Captura uma miniatura instantânea (snapshot BMP em Base64) de um monitor ou janela.
+    pub fn capture_source_snapshot(source_id: isize) -> anyhow::Result<String> {
+        unsafe {
+            let hmon = HMONITOR(source_id as *mut _);
+            let mut mi = MONITORINFOEXW::default();
+            mi.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+            let is_monitor = GetMonitorInfoW(hmon, &mut mi as *mut _ as *mut MONITORINFO).as_bool();
+
+            let (src_dc, src_x, src_y, src_w, src_h, release_hwnd) = if is_monitor {
+                let r = mi.monitorInfo.rcMonitor;
+                let (w, h) = ((r.right - r.left).max(1), (r.bottom - r.top).max(1));
+                let hdc_screen = GetDC(None);
+                (hdc_screen, r.left, r.top, w, h, None)
+            } else {
+                let hwnd = HWND(source_id as *mut _);
+                if !IsWindow(Some(hwnd)).as_bool() {
+                    return Err(anyhow::anyhow!("Janela não encontrada ou já fechada"));
+                }
+                let mut r = RECT::default();
+                let _ = GetWindowRect(hwnd, &mut r);
+                let w = (r.right - r.left).max(1);
+                let h = (r.bottom - r.top).max(1);
+                let hdc_win = GetDC(Some(hwnd));
+                (hdc_win, 0, 0, w, h, Some(hwnd))
+            };
+
+            if src_dc.0.is_null() {
+                return Err(anyhow::anyhow!("Falha ao obter Device Context (DC)"));
+            }
+
+            let max_thumb_w = 360f64;
+            let max_thumb_h = 202f64;
+            let scale = (max_thumb_w / src_w as f64).min(max_thumb_h / src_h as f64).min(1.0);
+            let thumb_w = ((src_w as f64 * scale).round() as i32).max(16);
+            let thumb_h = ((src_h as f64 * scale).round() as i32).max(16);
+
+            let mem_dc = CreateCompatibleDC(Some(src_dc));
+            let hbm = CreateCompatibleBitmap(src_dc, thumb_w, thumb_h);
+            let old_bm = SelectObject(mem_dc, hbm.into());
+
+            SetStretchBltMode(mem_dc, HALFTONE);
+            let _ = StretchBlt(
+                mem_dc,
+                0,
+                0,
+                thumb_w,
+                thumb_h,
+                Some(src_dc),
+                src_x,
+                src_y,
+                src_w,
+                src_h,
+                SRCCOPY,
+            );
+
+            let mut bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: thumb_w,
+                    biHeight: -thumb_h, // top-down
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let pixel_bytes_count = (thumb_w * thumb_h * 4) as usize;
+            let mut pixels = vec![0u8; pixel_bytes_count];
+
+            GetDIBits(
+                mem_dc,
+                hbm,
+                0,
+                thumb_h as u32,
+                Some(pixels.as_mut_ptr() as *mut _),
+                &mut bmi,
+                DIB_RGB_COLORS,
+            );
+
+            SelectObject(mem_dc, old_bm);
+            let _ = DeleteObject(hbm.into());
+            let _ = DeleteDC(mem_dc);
+            ReleaseDC(release_hwnd, src_dc);
+
+            let file_size = 54 + pixels.len();
+            let mut bmp = Vec::with_capacity(file_size);
+            bmp.extend_from_slice(b"BM");
+            bmp.extend_from_slice(&(file_size as u32).to_le_bytes());
+            bmp.extend_from_slice(&[0, 0, 0, 0]);
+            bmp.extend_from_slice(&54u32.to_le_bytes());
+            bmp.extend_from_slice(&40u32.to_le_bytes());
+            bmp.extend_from_slice(&thumb_w.to_le_bytes());
+            bmp.extend_from_slice(&(-thumb_h).to_le_bytes());
+            bmp.extend_from_slice(&1u16.to_le_bytes());
+            bmp.extend_from_slice(&32u16.to_le_bytes());
+            bmp.extend_from_slice(&0u32.to_le_bytes());
+            bmp.extend_from_slice(&(pixels.len() as u32).to_le_bytes());
+            bmp.extend_from_slice(&2835u32.to_le_bytes());
+            bmp.extend_from_slice(&2835u32.to_le_bytes());
+            bmp.extend_from_slice(&0u32.to_le_bytes());
+            bmp.extend_from_slice(&0u32.to_le_bytes());
+            bmp.extend_from_slice(&pixels);
+
+            let b64 = crate::pipeline::base64_encode(&bmp);
+            Ok(format!("data:image/bmp;base64,{b64}"))
+        }
+    }
 }

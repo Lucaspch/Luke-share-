@@ -21,6 +21,12 @@ pub struct VideoOffer {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    #[serde(default = "default_codec")]
+    pub codec: String,
+}
+
+fn default_codec() -> String {
+    "h264".into()
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -187,7 +193,7 @@ mod tests {
     #[tokio::test]
     async fn control_roundtrip() {
         let (mut a, mut b) = tokio::io::duplex(4096);
-        let m = Control::Accept { video: VideoOffer { width: 1920, height: 1080, fps: 60 }, audio: Some(AudioOffer { sample_rate: 48000, channels: 2 }), udp_port: 5000 };
+        let m = Control::Accept { video: VideoOffer { width: 1920, height: 1080, fps: 60, codec: "h264".into() }, audio: Some(AudioOffer { sample_rate: 48000, channels: 2 }), udp_port: 5000 };
         write_control(&mut a, &m).await.unwrap();
         assert_eq!(read_control(&mut b).await.unwrap(), m);
     }

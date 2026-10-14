@@ -9,7 +9,7 @@ export interface PlayerStats {
 export type StreamEvent =
   | { t: "video"; k: boolean; p: number; d: string }
   | { t: "audio"; d: string }
-  | { t: "config"; width: number; height: number; fps: number }
+  | { t: "config"; width: number; height: number; fps: number; codec?: string }
   | { t: "audio_state"; enabled: boolean }
   | {
       t: "telemetry";
@@ -39,6 +39,9 @@ export class StreamPlayer {
   private lastFpsCalcTime = performance.now();
   private currentFps = 0;
   private hasFirstKeyFrame = false;
+  private currentCodec = "h264";
+  private pipVideo: HTMLVideoElement | null = null;
+  private isPiP = false;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -122,28 +125,99 @@ export class StreamPlayer {
       },
     });
 
-    this.configureDecoder();
+    this.configureDecoder(this.currentCodec);
   }
 
-  private configureDecoder() {
-    if (this.videoDecoder) {
+  public configureDecoder(codecName?: string) {
+    if (codecName) {
+      this.currentCodec = codecName.toLowerCase().trim();
+    }
+    if (!this.videoDecoder) return;
+
+    const candidates: string[] = [];
+    if (this.currentCodec === "av1") {
+      candidates.push("av01.0.08M.08", "av01.0.05M.08", "avc1.640034");
+    } else if (this.currentCodec === "hevc" || this.currentCodec === "h265") {
+      candidates.push("hev1.1.6.L120.90", "hvc1.1.6.L120.90", "avc1.640034");
+    } else if (this.currentCodec === "auto") {
+      candidates.push("av01.0.08M.08", "hev1.1.6.L120.90", "avc1.640034", "avc1.64002a");
+    } else {
+      candidates.push("avc1.640034", "avc1.64002a");
+    }
+
+    let configured = false;
+    for (const codecString of candidates) {
       try {
         this.videoDecoder.configure({
-          codec: "avc1.640034", // H.264 High Profile Level 5.2 (suporta até 240 FPS em 1080p)
+          codec: codecString,
           optimizeForLatency: true,
           hardwareAcceleration: "prefer-hardware",
         });
-      } catch (_) {
-        try {
-          this.videoDecoder.configure({
-            codec: "avc1.64002a", // Fallback Level 4.2
-            optimizeForLatency: true,
-            hardwareAcceleration: "prefer-hardware",
-          });
-        } catch (e) {
-          console.warn("Erro ao configurar VideoDecoder:", e);
-        }
+        console.log(`VideoDecoder configurado com sucesso para: ${codecString}`);
+        configured = true;
+        break;
+      } catch (e) {
+        console.warn(`Tentativa com codec ${codecString} falhou, tentando próximo:`, e);
       }
+    }
+
+    if (!configured) {
+      try {
+        this.videoDecoder.configure({
+          codec: "avc1.64002a",
+          optimizeForLatency: true,
+          hardwareAcceleration: "prefer-hardware",
+        });
+      } catch (e) {
+        console.error("Falha ao configurar VideoDecoder:", e);
+      }
+    }
+  }
+
+  public isPiPActive(): boolean {
+    return this.isPiP || document.pictureInPictureElement !== null;
+  }
+
+  public async togglePiP(): Promise<boolean> {
+    if (document.pictureInPictureElement) {
+      await document.exitPictureInPicture();
+      this.isPiP = false;
+      return false;
+    }
+
+    try {
+      if (!this.pipVideo) {
+        this.pipVideo = document.createElement("video");
+        this.pipVideo.muted = true;
+        this.pipVideo.playsInline = true;
+        this.pipVideo.autoplay = true;
+        this.pipVideo.style.position = "fixed";
+        this.pipVideo.style.top = "-9999px";
+        this.pipVideo.style.left = "-9999px";
+        this.pipVideo.style.width = "1px";
+        this.pipVideo.style.height = "1px";
+        this.pipVideo.style.opacity = "0";
+        this.pipVideo.style.pointerEvents = "none";
+        document.body.appendChild(this.pipVideo);
+
+        this.pipVideo.addEventListener("leavepictureinpicture", () => {
+          this.isPiP = false;
+        });
+      }
+
+      const stream = (this.canvas as any).captureStream ? (this.canvas as any).captureStream(60) : null;
+      if (!stream) {
+        throw new Error("captureStream() não suportado no canvas deste navegador");
+      }
+
+      this.pipVideo.srcObject = stream;
+      await this.pipVideo.play();
+      await this.pipVideo.requestPictureInPicture();
+      this.isPiP = true;
+      return true;
+    } catch (e) {
+      console.warn("Erro ao iniciar Picture-in-Picture:", e);
+      throw e;
     }
   }
 
@@ -259,6 +333,14 @@ export class StreamPlayer {
         }
       } catch (_) {}
       this.videoDecoder = null;
+    }
+
+    if (this.pipVideo) {
+      if (document.pictureInPictureElement === this.pipVideo) {
+        document.exitPictureInPicture().catch(() => {});
+      }
+      this.pipVideo.remove();
+      this.pipVideo = null;
     }
 
     if (this.audioCtx) {

@@ -435,7 +435,7 @@ mod tests {
                 Control::Watch { nick, .. } => {
                     assert_eq!(nick, "LucasViewer");
                     let accept_msg = Control::Accept {
-                        video: VideoOffer { width: 1920, height: 1080, fps: 60 },
+                        video: VideoOffer { width: 1920, height: 1080, fps: 60, codec: "h264".into() },
                         audio: None,
                         udp_port: 0,
                     };
@@ -496,7 +496,7 @@ mod tests {
 
         host_mgr.clone().start_listener(
             host_ep,
-            VideoOffer { width: 1920, height: 1080, fps: 60 },
+            VideoOffer { width: 1920, height: 1080, fps: 60, codec: "h264".into() },
             None,
             ring,
             Arc::new(|| {}),

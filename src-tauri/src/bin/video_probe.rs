@@ -11,7 +11,7 @@ use std::time::Duration;
 use luke_share_lib::capture::sources::list_sources;
 use luke_share_lib::capture::wgc::WgcCapture;
 use luke_share_lib::video::d3d::Gpu;
-use luke_share_lib::video::encoder::{EncoderConfig, H264Encoder};
+use luke_share_lib::video::encoder::{EncoderConfig, H264Encoder, VideoCodec};
 use luke_share_lib::video::h264::stream_size;
 use luke_share_lib::video::resolution::{target_size, Preset};
 use luke_share_lib::video::scaler::Scaler;
@@ -83,6 +83,7 @@ fn main() -> anyhow::Result<()> {
         height: out_h,
         fps: 60,
         bitrate: preset.default_bitrate(),
+        codec: VideoCodec::Auto,
     };
 
     let frame_count = Arc::new(AtomicUsize::new(0));

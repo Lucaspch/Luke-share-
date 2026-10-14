@@ -7,3 +7,4 @@ src-tauri/gen/
 src-tauri/.updater-key
 *.zip
 release-dist/
+Luke-Share-v*/

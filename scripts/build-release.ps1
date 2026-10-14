@@ -1,6 +1,6 @@
 param(
     [string]$Version = "",
-    [string]$Notes = "Melhorias de desempenho e correcoes de estabilidade.",
+    [string]$Notes = "Mini-Player flutuante (PiP / Always on Top), interface dark inspirada no Discord, suporte a codecs AV1 e HEVC com fallback H.264 e pre-visualizacao instantanea.",
     [string]$Repo = "Lucaspch/Luke-share-"
 )
 
