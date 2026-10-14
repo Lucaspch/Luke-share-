@@ -24,22 +24,26 @@ impl Preset {
     /// Bitrate alvo padrão (bps) para 1 espectador.
     pub fn default_bitrate(self) -> u32 {
         match self {
-            Preset::Source => 6_000_000,
-            Preset::P1080 => 4_500_000,
-            Preset::P720 => 2_500_000,
-            Preset::P480 => 1_200_000,
+            Preset::Source => 18_000_000,
+            Preset::P1080 => 14_000_000,
+            Preset::P720 => 8_000_000,
+            Preset::P480 => 3_500_000,
         }
     }
 
     /// Bitrate adaptativo por espectador baseado no número de pessoas assistindo.
     pub fn adaptive_bitrate(self, viewers_count: usize) -> u32 {
-        let base = self.default_bitrate();
-        match viewers_count {
-            0 | 1 => base,
-            2 => (base * 4 / 5).max(2_000_000),
-            3 => (base * 3 / 5).max(1_500_000),
-            _ => (base / 2).max(1_200_000),
-        }
+        calculate_adaptive_bitrate(self.default_bitrate(), viewers_count)
+    }
+}
+
+/// Calcula taxa adaptativa com base na contagem de espectadores
+pub fn calculate_adaptive_bitrate(base: u32, viewers_count: usize) -> u32 {
+    match viewers_count {
+        0 | 1 => base,
+        2 => (base * 4 / 5).max(base / 2),
+        3 => (base * 3 / 5).max(base * 2 / 5),
+        _ => (base / 2).max(base / 3),
     }
 }
 

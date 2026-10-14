@@ -148,8 +148,11 @@ impl CongestionController {
 
     pub fn set_max_bitrate(&mut self, max: u32) {
         self.max_bitrate = max;
+        self.min_bitrate = (max / 3).max(3_000_000).min(max);
         if self.current_bitrate > self.max_bitrate {
             self.current_bitrate = self.max_bitrate;
+        } else if self.current_bitrate < self.min_bitrate {
+            self.current_bitrate = self.min_bitrate;
         }
     }
 
@@ -182,11 +185,11 @@ impl CongestionController {
                 return Some(new_br);
             }
         } else if loss_pct <= 0.8 && rtt_ms <= 180 {
-            // Canal limpo: após 3 relatórios consecutivos (~4 a 6 segundos), aplica Aumento Aditivo
+            // Canal limpo: após 2 relatórios consecutivos (~3 a 4 segundos), aplica Aumento Aditivo
             self.clean_ticks += 1;
-            if self.clean_ticks >= 3 && self.current_bitrate < self.max_bitrate {
+            if self.clean_ticks >= 2 && self.current_bitrate < self.max_bitrate {
                 self.clean_ticks = 0;
-                let step = 300_000; // +300 kbps
+                let step = (self.max_bitrate / 15).max(800_000); // recuperação ágil em redes saudáveis (+800kbps a +1.5Mbps)
                 let new_br = (self.current_bitrate + step).min(self.max_bitrate);
                 if new_br != self.current_bitrate {
                     tracing::info!(
@@ -523,7 +526,9 @@ impl Reassembler {
         if age >= timeout {
             // perda irrecuperável: quebra da cadeia de referência H.264
             if let Some(stalled) = self.frames.remove(&next) {
-                self.packets_lost += stalled.missing().len() as u64;
+                if !self.need_key {
+                    self.packets_lost += stalled.missing().len() as u64;
+                }
             }
             self.dropped_frames += 1;
 
@@ -733,9 +738,8 @@ mod tests {
         // Reset cooldown artificialmente recriando ou testando o aumento
         let mut cc_stable = CongestionController::new(1_000_000, 5_000_000, 4_000_000);
         assert_eq!(cc_stable.on_telemetry(25, 0.0), None); // tick 1
-        assert_eq!(cc_stable.on_telemetry(25, 0.0), None); // tick 2
-        let increased = cc_stable.on_telemetry(25, 0.0);   // tick 3 -> +300 kbps
-        assert_eq!(increased, Some(4_300_000));
-        assert_eq!(cc_stable.current_bitrate(), 4_300_000);
+        let increased = cc_stable.on_telemetry(25, 0.0);   // tick 2 -> +800 kbps
+        assert_eq!(increased, Some(4_800_000));
+        assert_eq!(cc_stable.current_bitrate(), 4_800_000);
     }
 }

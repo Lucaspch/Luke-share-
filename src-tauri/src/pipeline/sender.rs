@@ -24,7 +24,7 @@ use crate::net::transport::{
 };
 use crate::video::d3d::Gpu;
 use crate::video::encoder::{EncodedFrame, EncoderConfig, H264Encoder};
-use crate::video::resolution::{target_size, Preset};
+use crate::video::resolution::{calculate_adaptive_bitrate, target_size, Preset};
 use crate::video::scaler::Scaler;
 
 pub type PreviewSink = Arc<dyn Fn(bool, u32, Vec<u8>) + Send + Sync>;
@@ -51,6 +51,7 @@ impl SenderPipeline {
         source: SourceInfo,
         preset: Preset,
         fps_target: Option<u32>,
+        custom_bitrate_kbps: Option<u32>,
         audio_muted: bool,
         control_server: Arc<ControlServer>,
         preview_sink: Option<PreviewSink>,
@@ -104,8 +105,12 @@ impl SenderPipeline {
             .context("falha ao inicializar Scaler GPU")?;
 
         // 3. Inicializa Encoder H.264
-        // Bitrate adaptado dinamicamente para altas taxas de quadros (>60 FPS)
-        let base_bitrate = preset.default_bitrate();
+        // Bitrate adaptado dinamicamente para altas taxas de quadros (>60 FPS) ou customizado
+        let base_bitrate = if let Some(kbps) = custom_bitrate_kbps {
+            kbps * 1_000
+        } else {
+            preset.default_bitrate()
+        };
         let bitrate = if effective_fps > 60 {
             let scale_factor = (effective_fps as f32 / 60.0).sqrt();
             (base_bitrate as f32 * scale_factor) as u32
@@ -146,7 +151,8 @@ impl SenderPipeline {
         audio_cap.set_muted(audio_muted);
 
         let ring = Arc::new(Mutex::new(RetransmitRing::new(512)));
-        let congestion_controller = Arc::new(Mutex::new(CongestionController::new(1_500_000, bitrate, bitrate)));
+        let min_bitrate = (bitrate / 3).max(3_000_000).min(bitrate);
+        let congestion_controller = Arc::new(Mutex::new(CongestionController::new(min_bitrate, bitrate, bitrate)));
 
         // Inicializa gerenciador P2P Nativo Iroh se fornecido
         let (p2p_host, room_ticket) = if let Some(endpoint) = p2p_endpoint {
@@ -287,7 +293,7 @@ impl SenderPipeline {
                         // Ajuste dinâmico de bitrate baseado no número total de espectadores
                         if total_viewers != last_viewers_cnt {
                             last_viewers_cnt = total_viewers;
-                            let target_br = preset.adaptive_bitrate(total_viewers);
+                            let target_br = calculate_adaptive_bitrate(bitrate, total_viewers);
                             cc2.lock().set_max_bitrate(target_br);
                             let cur_br = cc2.lock().current_bitrate();
                             enc2.set_bitrate(cur_br);

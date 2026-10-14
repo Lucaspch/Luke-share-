@@ -120,6 +120,7 @@ pub async fn start_share(
     source_id: isize,
     preset_str: String,
     fps_target: Option<u32>,
+    bitrate_kbps: Option<u32>,
     audio_muted: bool,
     on_preview: Channel<StreamEvent>,
 ) -> Result<ShareInfo, String> {
@@ -169,6 +170,7 @@ pub async fn start_share(
         source.clone(),
         preset,
         fps_target,
+        bitrate_kbps,
         audio_muted,
         state.control_server.clone(),
         Some(preview_sink),

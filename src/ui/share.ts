@@ -28,6 +28,7 @@ export interface ShareManagerElements {
   tabButtons: NodeListOf<HTMLButtonElement>;
   resolutionSelect: HTMLSelectElement;
   fpsSelect?: HTMLSelectElement;
+  bitrateSelect?: HTMLSelectElement;
   audioCheckbox: HTMLInputElement;
   btnStart: HTMLButtonElement;
   btnStop: HTMLButtonElement;
@@ -53,6 +54,7 @@ export class ShareManager {
   private tabButtons: NodeListOf<HTMLButtonElement>;
   private resolutionSelect: HTMLSelectElement;
   private fpsSelect: HTMLSelectElement | null = null;
+  private bitrateSelect: HTMLSelectElement | null = null;
   private audioCheckbox: HTMLInputElement;
   private btnStart: HTMLButtonElement;
   private btnStop: HTMLButtonElement;
@@ -90,6 +92,7 @@ export class ShareManager {
     this.tabButtons = elements.tabButtons;
     this.resolutionSelect = elements.resolutionSelect;
     this.fpsSelect = elements.fpsSelect || null;
+    this.bitrateSelect = elements.bitrateSelect || null;
     this.audioCheckbox = elements.audioCheckbox;
     this.btnStart = elements.btnStart;
     this.btnStop = elements.btnStop;
@@ -267,6 +270,14 @@ export class ShareManager {
       }
     }
 
+    let bitrateKbps: number | null = null;
+    if (this.bitrateSelect) {
+      const bVal = this.bitrateSelect.value;
+      if (bVal !== "auto") {
+        bitrateKbps = parseInt(bVal, 10) || null;
+      }
+    }
+
     try {
       this.btnStart.disabled = true;
       this.btnStart.textContent = "Iniciando...";
@@ -299,6 +310,7 @@ export class ShareManager {
         sourceId: this.selectedSourceId,
         presetStr: preset,
         fpsTarget,
+        bitrateKbps,
         audioMuted: !audioEnabled,
         onPreview,
       });

@@ -157,6 +157,9 @@ impl Core {
                 set(&CODECAPI_AVLowLatencyMode, var_bool(true));
                 set(&CODECAPI_AVEncCommonRateControlMode, var_u32(eAVEncCommonRateControlMode_CBR.0 as u32));
                 set(&CODECAPI_AVEncCommonMeanBitRate, var_u32(cfg.bitrate));
+                set(&CODECAPI_AVEncCommonMaxBitRate, var_u32(cfg.bitrate.saturating_mul(125) / 100));
+                set(&CODECAPI_AVEncCommonQuality, var_u32(85));
+                set(&CODECAPI_AVEncCommonQualityVsSpeed, var_u32(75));
                 set(&CODECAPI_AVEncMPVDefaultBPictureCount, var_u32(0));
                 set(&CODECAPI_AVEncMPVGOPSize, var_u32((cfg.fps * 2).max(60))); // 120 frames @ 60fps = 2 segundos
                 set(&CODECAPI_AVEncCommonRealTime, var_u32(1));
@@ -251,6 +254,8 @@ impl Core {
             unsafe {
                 let v = var_u32(br);
                 let _ = api.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &v);
+                let max_br = var_u32(br.saturating_mul(125) / 100);
+                let _ = api.SetValue(&CODECAPI_AVEncCommonMaxBitRate, &max_br);
             }
             self.cfg.bitrate = br;
             tracing::info!("encoder: bitrate atualizado dinamicamente para {} bps", br);

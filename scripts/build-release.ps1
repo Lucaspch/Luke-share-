@@ -24,25 +24,26 @@ $currentVer = $tauriConf.version
 
 if ($Version -ne "" -and $Version -ne $currentVer) {
     Write-Host "Atualizando versao de $currentVer para $Version..." -ForegroundColor Yellow
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
     
     # Atualiza tauri.conf.json
     $tauriConf.version = $Version
-    $tauriConf | ConvertTo-Json -Depth 10 | Set-Content $tauriConfPath -Encoding utf8
+    [System.IO.File]::WriteAllText($tauriConfPath, ($tauriConf | ConvertTo-Json -Depth 10), $utf8NoBom)
     
     # Atualiza package.json
     $pkg = Get-Content $pkgPath -Raw | ConvertFrom-Json
     $pkg.version = $Version
-    $pkg | ConvertTo-Json -Depth 10 | Set-Content $pkgPath -Encoding utf8
+    [System.IO.File]::WriteAllText($pkgPath, ($pkg | ConvertTo-Json -Depth 10), $utf8NoBom)
     
     # Atualiza Cargo.toml
-    $cargoContent = Get-Content $cargoPath -Raw
+    $cargoContent = [System.IO.File]::ReadAllText($cargoPath, [System.Text.Encoding]::UTF8)
     $cargoContent = $cargoContent -replace 'version = "' + [regex]::Escape($currentVer) + '"', ('version = "' + $Version + '"')
-    Set-Content $cargoPath $cargoContent -Encoding utf8
+    [System.IO.File]::WriteAllText($cargoPath, $cargoContent, $utf8NoBom)
     
     # Atualiza index.html tag
-    $htmlContent = Get-Content $htmlPath -Raw
+    $htmlContent = [System.IO.File]::ReadAllText($htmlPath, [System.Text.Encoding]::UTF8)
     $htmlContent = $htmlContent -replace 'v' + [regex]::Escape($currentVer), ('v' + $Version)
-    Set-Content $htmlPath $htmlContent -Encoding utf8
+    [System.IO.File]::WriteAllText($htmlPath, $htmlContent, $utf8NoBom)
     
     $currentVer = $Version
 }

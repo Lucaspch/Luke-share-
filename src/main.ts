@@ -134,6 +134,7 @@ class App {
         tabButtons: document.querySelectorAll<HTMLButtonElement>(".tab-btn"),
         resolutionSelect: document.getElementById("resolution-select") as HTMLSelectElement,
         fpsSelect: document.getElementById("fps-select") as HTMLSelectElement,
+        bitrateSelect: document.getElementById("bitrate-select") as HTMLSelectElement,
         audioCheckbox: document.getElementById("audio-enable-checkbox") as HTMLInputElement,
         btnStart: document.getElementById("btn-start-share") as HTMLButtonElement,
         btnStop: document.getElementById("btn-stop-share") as HTMLButtonElement,
