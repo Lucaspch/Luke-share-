@@ -182,12 +182,18 @@ class App {
         if (streaming) {
           this.btnCallShare.classList.add("active-share");
           this.btnCallShare.innerHTML = '<span class="call-icon">🔴</span>';
-          this.btnCallShare.title = "Você está transmitindo tela (Clique para ver/copiar código)";
+          this.btnCallShare.title = "Você está transmitindo tela (Clique para ver opções)";
 
-          // Se estiver na tela da chamada, renderiza o Host Tile na grade
-          if (!this.watchPanel.classList.contains("hidden")) {
-            this.renderHostTile();
+          const ticket = this.shareManager.getRoomTicket();
+          const btnCallCopyTicket = document.getElementById("btn-call-copy-ticket") as HTMLButtonElement | null;
+          if (btnCallCopyTicket && ticket) {
+            btnCallCopyTicket.title = `Copiar Código da Sala: ${ticket}`;
           }
+
+          // Entra imediatamente na Sala de Chamada (Grade de Vídeo estilo Discord)
+          this.sharePanel.classList.add("hidden");
+          this.watchPanel.classList.remove("hidden");
+          this.renderHostTile();
         } else {
           this.btnCallShare.classList.remove("active-share");
           this.btnCallShare.innerHTML = '<span class="call-icon">🖥️</span>';
@@ -243,12 +249,11 @@ class App {
     // Botão de Transmitir Tela dentro da chamada (Discord style)
     this.btnCallShare.addEventListener("click", () => {
       if (this.shareManager.getIsSharing()) {
-        const ticket = this.shareManager.getRoomTicket();
-        if (ticket) {
-          navigator.clipboard.writeText(ticket);
-          alert(`Você já está transmitindo!\nCódigo da Sala copiado para a Área de Transferência:\n\n${ticket}`);
-        } else {
-          alert("Você já está transmitindo ao vivo!");
+        const confirmStop = confirm(
+          "Você já está transmitindo sua tela nesta chamada.\n\nDeseja encerrar o compartilhamento da sua tela?"
+        );
+        if (confirmStop) {
+          this.shareManager.stopShare();
         }
       } else {
         this.shareManager.openShareModal();
@@ -591,12 +596,14 @@ class App {
       } catch (_) {}
     }
 
+    // Se estiver transmitindo tela ao sair da chamada, encerra a transmissão também
+    if (this.shareManager.getIsSharing()) {
+      await this.shareManager.stopShare();
+    }
+
     this.updateGridLayout();
     this.updateStatusPill();
-
-    if (!this.shareManager.getIsSharing()) {
-      this.returnToSharePanel();
-    }
+    this.returnToSharePanel();
   }
 
   private returnToSharePanel() {
@@ -617,6 +624,10 @@ class App {
     tile.innerHTML = `
       <div class="stream-tile-canvas-wrap">
         <canvas id="host-stream-tile-canvas" class="stream-tile-canvas"></canvas>
+        <div id="host-tile-overlay" class="player-overlay">
+          <div class="spinner"></div>
+          <div class="overlay-text">Iniciando prévia da sua transmissão...</div>
+        </div>
       </div>
 
       <div class="tile-top-overlay">
@@ -638,13 +649,25 @@ class App {
     `;
 
     const canvas = tile.querySelector("#host-stream-tile-canvas") as HTMLCanvasElement;
+    const overlay = tile.querySelector("#host-tile-overlay") as HTMLElement;
     const btnCopy = tile.querySelector("#btn-host-tile-copy") as HTMLButtonElement;
     const btnMute = tile.querySelector("#btn-host-tile-mute") as HTMLButtonElement;
     const btnStop = tile.querySelector("#btn-host-tile-stop") as HTMLButtonElement;
     const btnFocus = tile.querySelector(".btn-tile-focus") as HTMLButtonElement;
 
     // StreamPlayer sem áudio para espelho local
-    this.hostTilePlayer = new StreamPlayer(canvas, null, undefined, false);
+    this.hostTilePlayer = new StreamPlayer(canvas, overlay, undefined, false);
+
+    // Configura dimensões e codec imediatamente com as informações salvas do host
+    const shareInfo = this.shareManager.getShareInfo();
+    if (shareInfo) {
+      if (shareInfo.width && shareInfo.height) {
+        this.hostTilePlayer.setDimensions(shareInfo.width, shareInfo.height);
+      }
+      if (shareInfo.codec) {
+        this.hostTilePlayer.configureDecoder(shareInfo.codec);
+      }
+    }
 
     btnCopy.addEventListener("click", () => {
       const ticket = this.shareManager.getRoomTicket();
@@ -685,6 +708,11 @@ class App {
       this.clearStreamFocus();
     }
     this.updateGridLayout();
+
+    // Se encerrou a transmissão e não está assistindo nenhum amigo, volta para a tela inicial
+    if (this.activeStreams.size === 0) {
+      this.returnToSharePanel();
+    }
   }
 
   private toggleFocusStream(id: string) {

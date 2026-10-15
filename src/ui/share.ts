@@ -103,6 +103,7 @@ export class ShareManager {
   private modal?: ModalShareElements;
   public onPreviewStreamEvent?: (msg: StreamEvent) => void;
   public onViewersCountChange?: (count: number, text: string) => void;
+  private currentShareInfo: ShareInfo | null = null;
 
   private currentSources: SourceInfo[] = [];
   private activeTab: "monitors" | "windows" = "monitors";
@@ -503,6 +504,7 @@ export class ShareManager {
         }
       }
 
+      this.currentShareInfo = info;
       this.isSharing = true;
       this.isAudioMuted = !audioEnabled;
       this.sourcesSelectionArea.classList.add("hidden");
@@ -617,6 +619,7 @@ export class ShareManager {
     } finally {
       this.isSharing = false;
       this.currentRoomTicket = null;
+      this.currentShareInfo = null;
       if (this.roomTicketBox) {
         this.roomTicketBox.classList.add("hidden");
       }
@@ -633,6 +636,10 @@ export class ShareManager {
         this.onStatusChange(false);
       }
     }
+  }
+
+  public getShareInfo(): ShareInfo | null {
+    return this.currentShareInfo;
   }
 
   private escapeHtml(str: string): string {

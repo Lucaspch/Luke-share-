@@ -35,9 +35,9 @@ if ($Version -ne "" -and $Version -ne $currentVer) {
     $pkg.version = $Version
     [System.IO.File]::WriteAllText($pkgPath, ($pkg | ConvertTo-Json -Depth 10), $utf8NoBom)
     
-    # Atualiza Cargo.toml
+    # Atualiza Cargo.toml (apenas a versao do [package])
     $cargoContent = [System.IO.File]::ReadAllText($cargoPath, [System.Text.Encoding]::UTF8)
-    $cargoContent = [regex]::Replace($cargoContent, '(?m)(^version\s*=\s*")[^"]+(")', ('${1}' + $Version + '${2}'))
+    $cargoContent = [regex]::Replace($cargoContent, '(?ms)(^\[package\].*?^version\s*=\s*")[^"]+(")', ('${1}' + $Version + '${2}'), 1)
     [System.IO.File]::WriteAllText($cargoPath, $cargoContent, $utf8NoBom)
     
     # Atualiza index.html tag
