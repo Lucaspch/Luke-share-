@@ -17,7 +17,7 @@
               <circle cx="8" cy="10" r="1" fill="currentColor" />
             </svg>
             <span class="logo-text">Luke-Share</span>
-            <span class="version-tag">v0.3.2</span>
+            <span class="version-tag">v0.3.3</span>
             <button id="btn-check-updates" class="btn-check-update" title="Verificar se há atualizações">
               <span>🔄 Atualizações</span>
               <span id="update-badge" class="update-badge-dot hidden"></span>
@@ -222,51 +222,143 @@
             </div>
           </div>
 
-          <!-- Modo 2: Visualizador / Player de Transmissão -->
+          <!-- Modo 2: Visualizador / Sala de Chamada Multi-Stream (Estilo Discord Call) -->
           <div id="watch-panel" class="panel-section hidden">
+            <!-- Barra Superior da Sala -->
             <div class="watch-header">
               <div class="watch-info">
-                <span class="status-dot red"></span>
-                <span class="watch-title">Assistindo: <strong id="watch-host-name">-</strong></span>
-                <span class="watch-meta" id="watch-meta-info">Conectando...</span>
+                <span class="status-dot green"></span>
+                <span class="watch-title">Sala de Transmissão</span>
+                <span class="badge-count" id="streams-count-badge">0 transmissões</span>
               </div>
               <div class="watch-actions">
-                <button id="btn-pip" class="btn-secondary btn-sm" title="Picture-in-Picture (Janela Flutuante do Windows)">📌 PiP</button>
+                <button id="btn-call-share" class="btn-primary btn-sm" title="Transmitir sua tela para os amigos nesta chamada">
+                  <span class="btn-icon">📺</span> Transmitir Minha Tela
+                </button>
+                <button id="btn-call-grid-mode" class="btn-secondary btn-sm" title="Alternar visualização em Grade ou Foco">🪟 Grade</button>
                 <button id="btn-mini-player" class="btn-secondary btn-sm" title="Modo Mini-Player Flutuante (Sempre no Topo)">🪟 Mini-Player</button>
                 <button id="btn-fullscreen" class="btn-secondary btn-sm" title="Tela Cheia">⛶ Tela Cheia</button>
-                <button id="btn-stop-watch" class="btn-danger btn-sm">Desconectar</button>
+                <button id="btn-stop-all-watch" class="btn-danger btn-sm" title="Desconectar das transmissões assistidas">Sair da Chamada</button>
               </div>
             </div>
 
-            <div class="canvas-container" id="canvas-container">
-              <canvas id="stream-canvas"></canvas>
-              <div id="player-overlay" class="player-overlay">
-                <div class="spinner"></div>
-                <div class="overlay-text">Aguardando sinal de vídeo...</div>
+            <!-- Grade Dinâmica de Transmissões -->
+            <div class="streams-grid-wrapper" id="streams-grid-wrapper">
+              <div class="streams-grid count-1" id="streams-grid">
+                <!-- Tiles dos amigos e o Host Tile entram aqui dinamicamente -->
               </div>
               <div class="mini-player-overlay" id="mini-player-overlay">
                 <button id="btn-exit-mini-player" class="btn-mini-restore" title="Restaurar janela completa">⤢ Restaurar Janela</button>
               </div>
             </div>
-
-            <div class="player-controls-bar">
-              <div class="player-control-group">
-                <span class="control-label">Volume:</span>
-                <input type="range" id="volume-slider" min="0" max="1" step="0.05" value="1" />
-                <button id="btn-player-mute" class="btn-icon-sm">🔊</button>
-              </div>
-
-              <div class="player-stats">
-                <span id="player-res-tag">0x0</span>
-                <span id="player-fps-tag">60 FPS</span>
-                <span id="player-rtt-tag" class="badge-telemetry" title="RTT / Latência de ida e volta">RTT: -</span>
-                <span id="player-loss-tag" class="badge-telemetry" title="Taxa de perda e recuperação NACK">Perda: 0%</span>
-                <span class="badge-low-latency">WebCodecs Zero-Copy</span>
-              </div>
-            </div>
           </div>
         </section>
       </main>
+
+      <!-- Modal para Iniciar Transmissão durante a Chamada (Estilo Discord) -->
+      <div id="share-modal" class="modal-backdrop hidden">
+        <div class="modal-card modal-card-lg">
+          <div class="modal-header">
+            <div class="modal-title-group">
+              <span class="modal-icon">📺</span>
+              <h3>Transmitir Sua Tela na Chamada</h3>
+            </div>
+            <button id="btn-close-share-modal" class="btn-icon-sm" title="Fechar">&times;</button>
+          </div>
+          <div class="modal-body modal-scrollable">
+            <div class="source-type-tabs">
+              <button class="modal-tab-btn tab-btn active" data-tab="monitors">🖥️ Monitores</button>
+              <button class="modal-tab-btn tab-btn" data-tab="windows">🪟 Aplicativos</button>
+            </div>
+
+            <!-- Lista de Fontes dentro do Modal -->
+            <div class="sources-grid modal-sources-grid" id="modal-sources-grid">
+              <div class="loading-sources">Carregando telas e janelas...</div>
+            </div>
+
+            <!-- Miniatura da Fonte Selecionada -->
+            <div class="source-preview-card" id="modal-source-preview-card">
+              <div class="source-preview-header">
+                <div class="preview-header-left">
+                  <span class="preview-dot"></span>
+                  <span class="preview-title">Prévia da Captura</span>
+                </div>
+                <button id="btn-refresh-modal-preview" class="btn-secondary btn-sm" title="Capturar nova miniatura">🔄 Atualizar Prévia</button>
+              </div>
+              <div class="source-preview-body">
+                <img id="modal-source-preview-img" class="source-preview-img hidden" alt="Miniatura da tela/janela" />
+                <div id="modal-source-preview-placeholder" class="source-preview-placeholder">
+                  <span>🖥️ Selecione um monitor ou janela acima para visualizar a prévia instantânea</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Controles de Configuração -->
+            <div class="share-controls-card">
+              <div class="control-row">
+                <div class="control-group">
+                  <label for="modal-codec-select">Codec de Vídeo:</label>
+                  <select id="modal-codec-select">
+                    <option value="auto" selected>✨ Auto (H.264 Ultra-Compatível • Baixa Latência)</option>
+                    <option value="h264">🛡️ H.264 / AVC (Universal • Baixa Latência)</option>
+                    <option value="hevc">🚀 HEVC / H.265 (Alta Fidelidade)</option>
+                    <option value="av1">💎 AV1 (Máxima Eficiência • Menos Bitrate)</option>
+                  </select>
+                </div>
+
+                <div class="control-group">
+                  <label for="modal-resolution-select">Qualidade / Resolução:</label>
+                  <select id="modal-resolution-select">
+                    <option value="1080" selected>1080p (1920x1080) — Recomendado</option>
+                    <option value="720">720p (1280x720) — Rápido</option>
+                    <option value="480">480p (854x480) — Baixo Consumo</option>
+                    <option value="source">Origem (Nativa exata)</option>
+                  </select>
+                </div>
+
+                <div class="control-group">
+                  <label for="modal-fps-select">Taxa de Quadros (FPS):</label>
+                  <select id="modal-fps-select">
+                    <option value="auto" selected>✨ Taxa do Monitor (Detectada)</option>
+                    <option value="60">60 FPS (Padrão)</option>
+                    <option value="120">120 FPS</option>
+                    <option value="144">144 FPS</option>
+                    <option value="240">240 FPS (Alta performance)</option>
+                    <option value="unlocked">🚀 Destravado (Sem limite)</option>
+                  </select>
+                </div>
+
+                <div class="control-group">
+                  <label for="modal-bitrate-select">Taxa de Bits (Bitrate):</label>
+                  <select id="modal-bitrate-select">
+                    <option value="auto" selected>⚡ Auto (Recomendado para Jogos)</option>
+                    <option value="20000">🚀 Ultra Gaming (20 Mbps)</option>
+                    <option value="14000">✨ Alta Qualidade (14 Mbps)</option>
+                    <option value="8000">⚖️ Equilibrado (8 Mbps)</option>
+                    <option value="4000">📉 Econômico (4 Mbps)</option>
+                  </select>
+                </div>
+
+                <div class="control-group">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="modal-audio-enable-checkbox" checked />
+                    <span>Transmitir Áudio do Sistema</span>
+                  </label>
+                  <div class="discord-badge">
+                    <span>🛡️ Discord.exe isolado automaticamente (sem eco)</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button id="btn-cancel-modal-share" class="btn-secondary btn-sm">Cancelar</button>
+            <button id="btn-start-modal-share" class="btn-primary btn-sm">
+              <span class="btn-icon">▶</span> Iniciar Transmissão
+            </button>
+          </div>
+        </div>
+      </div>
 
       <!-- Modal de Atualização Automática -->
       <div id="update-modal" class="modal-backdrop hidden">

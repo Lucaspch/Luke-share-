@@ -2,7 +2,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { PeersManager } from "./ui/peers";
 import { ShareManager } from "./ui/share";
-import { StreamPlayer } from "./media/player";
+import { StreamPlayer, StreamEvent } from "./media/player";
 import { UpdaterManager } from "./ui/updater";
 
 interface MyInfo {
@@ -13,58 +13,56 @@ interface MyInfo {
   adapter_name: string | null;
 }
 
-type StreamEvent =
-  | { t: "video"; k: boolean; p: number; d: string }
-  | { t: "audio"; d: string }
-  | { t: "config"; width: number; height: number; fps: number; codec?: string }
-  | { t: "audio_state"; enabled: boolean }
-  | {
-      t: "telemetry";
-      rtt_ms: number;
-      packets_rx: number;
-      loss_pct: number;
-      nacks_recovered: number;
-      fec_recovered?: number;
-      dropped_ref: number;
-      fps: number;
-    }
-  | { t: "ended"; reason: string };
+interface ActiveStream {
+  id: string;
+  nick: string;
+  addr: string;
+  player: StreamPlayer;
+  element: HTMLElement;
+  resTag: HTMLElement;
+  fpsTag: HTMLElement;
+  codecTag: HTMLElement;
+  rttTag: HTMLElement;
+  lossTag: HTMLElement;
+  volumeSlider: HTMLInputElement;
+  btnMute: HTMLButtonElement;
+}
 
 class App {
   private peersManager!: PeersManager;
   private shareManager!: ShareManager;
   private updaterManager!: UpdaterManager;
-  private player: StreamPlayer | null = null;
   private myInfo: MyInfo | null = null;
   private isMiniPlayer = false;
 
-  // Header Elements
+  // Mapa de transmissões ativas sendo assistidas (multi-stream)
+  private activeStreams = new Map<string, ActiveStream>();
+  private focusedStreamId: string | null = null;
+
+  // Stream preview do Host na Grade (quando anfitrião está na chamada)
+  private hostTileElement: HTMLElement | null = null;
+  private hostTilePlayer: StreamPlayer | null = null;
+
+  // Elementos do Cabeçalho
   private myIpEl = document.getElementById("my-ip") as HTMLElement;
   private myStatusEl = document.getElementById("my-status") as HTMLElement;
   private nickInput = document.getElementById("nick-input") as HTMLInputElement;
   private btnSaveNick = document.getElementById("btn-save-nick") as HTMLButtonElement;
 
-  // Panels
+  // Painéis Principais
   private sharePanel = document.getElementById("share-panel") as HTMLElement;
   private watchPanel = document.getElementById("watch-panel") as HTMLElement;
 
-  // Watch Elements
-  private watchHostName = document.getElementById("watch-host-name") as HTMLElement;
-  private watchMetaInfo = document.getElementById("watch-meta-info") as HTMLElement;
-  private btnStopWatch = document.getElementById("btn-stop-watch") as HTMLButtonElement;
+  // Elementos da Chamada / Multi-Stream (Watch Panel)
+  private streamsGridWrapper = document.getElementById("streams-grid-wrapper") as HTMLElement;
+  private streamsGrid = document.getElementById("streams-grid") as HTMLElement;
+  private streamsCountBadge = document.getElementById("streams-count-badge") as HTMLElement;
+  private btnCallShare = document.getElementById("btn-call-share") as HTMLButtonElement;
+  private btnCallGridMode = document.getElementById("btn-call-grid-mode") as HTMLButtonElement;
+  private btnStopAllWatch = document.getElementById("btn-stop-all-watch") as HTMLButtonElement;
   private btnFullscreen = document.getElementById("btn-fullscreen") as HTMLButtonElement;
-  private btnPip = document.getElementById("btn-pip") as HTMLButtonElement | null;
   private btnMiniPlayer = document.getElementById("btn-mini-player") as HTMLButtonElement | null;
   private btnExitMiniPlayer = document.getElementById("btn-exit-mini-player") as HTMLButtonElement | null;
-  private canvasContainer = document.getElementById("canvas-container") as HTMLElement;
-  private streamCanvas = document.getElementById("stream-canvas") as HTMLCanvasElement;
-  private playerOverlay = document.getElementById("player-overlay") as HTMLElement;
-  private volumeSlider = document.getElementById("volume-slider") as HTMLInputElement;
-  private btnPlayerMute = document.getElementById("btn-player-mute") as HTMLButtonElement;
-  private playerResTag = document.getElementById("player-res-tag") as HTMLElement;
-  private playerFpsTag = document.getElementById("player-fps-tag") as HTMLElement;
-  private playerRttTag = document.getElementById("player-rtt-tag") as HTMLElement;
-  private playerLossTag = document.getElementById("player-loss-tag") as HTMLElement;
 
   constructor() {
     this.init();
@@ -100,20 +98,26 @@ class App {
     }
 
     this.nickInput.value = this.myInfo.nick;
-    this.updateStatusPill(this.myInfo.status);
+    this.updateStatusPill();
   }
 
-  private updateStatusPill(status: "Idle" | "Streaming" | "Watching") {
-    const labels = {
-      Idle: "Ocioso",
-      Streaming: "🔴 Transmitindo",
-      Watching: "🟡 Assistindo",
-    };
-
+  private updateStatusPill() {
+    const isSharing = this.shareManager?.getIsSharing() || false;
+    const watchCount = this.activeStreams.size;
     this.myStatusEl.className = "status-pill";
-    if (status === "Streaming") this.myStatusEl.classList.add("streaming");
-    if (status === "Watching") this.myStatusEl.classList.add("watching");
-    this.myStatusEl.textContent = labels[status] || status;
+
+    if (isSharing && watchCount > 0) {
+      this.myStatusEl.classList.add("streaming");
+      this.myStatusEl.textContent = `🔴 Transmitindo + 🟡 Assistindo (${watchCount})`;
+    } else if (isSharing) {
+      this.myStatusEl.classList.add("streaming");
+      this.myStatusEl.textContent = "🔴 Transmitindo";
+    } else if (watchCount > 0) {
+      this.myStatusEl.classList.add("watching");
+      this.myStatusEl.textContent = `🟡 Assistindo (${watchCount})`;
+    } else {
+      this.myStatusEl.textContent = "Ocioso";
+    }
   }
 
   private initPeers() {
@@ -136,7 +140,7 @@ class App {
       {
         sourcesGrid: document.getElementById("sources-grid") as HTMLElement,
         btnRefresh: document.getElementById("btn-refresh-sources") as HTMLButtonElement,
-        tabButtons: document.querySelectorAll<HTMLButtonElement>(".tab-btn"),
+        tabButtons: document.querySelectorAll<HTMLButtonElement>("#share-panel .tab-btn"),
         resolutionSelect: document.getElementById("resolution-select") as HTMLSelectElement,
         fpsSelect: document.getElementById("fps-select") as HTMLSelectElement,
         bitrateSelect: document.getElementById("bitrate-select") as HTMLSelectElement,
@@ -161,11 +165,58 @@ class App {
         roomTicketBox: document.getElementById("room-ticket-box") as HTMLElement,
         shareTicketInput: document.getElementById("share-ticket-input") as HTMLInputElement,
         btnCopyTicket: document.getElementById("btn-copy-ticket") as HTMLButtonElement,
+        modal: {
+          modalBackdrop: document.getElementById("share-modal") as HTMLElement,
+          btnClose: document.getElementById("btn-close-share-modal") as HTMLButtonElement,
+          btnCancel: document.getElementById("btn-cancel-modal-share") as HTMLButtonElement,
+          btnStart: document.getElementById("btn-start-modal-share") as HTMLButtonElement,
+          tabButtons: document.querySelectorAll<HTMLButtonElement>(".modal-tab-btn"),
+          sourcesGrid: document.getElementById("modal-sources-grid") as HTMLElement,
+          sourcePreviewImg: document.getElementById("modal-source-preview-img") as HTMLImageElement,
+          sourcePreviewPlaceholder: document.getElementById("modal-source-preview-placeholder") as HTMLElement,
+          btnRefreshPreview: document.getElementById("btn-refresh-modal-preview") as HTMLButtonElement,
+          codecSelect: document.getElementById("modal-codec-select") as HTMLSelectElement,
+          resolutionSelect: document.getElementById("modal-resolution-select") as HTMLSelectElement,
+          fpsSelect: document.getElementById("modal-fps-select") as HTMLSelectElement,
+          bitrateSelect: document.getElementById("modal-bitrate-select") as HTMLSelectElement,
+          audioCheckbox: document.getElementById("modal-audio-enable-checkbox") as HTMLInputElement,
+        },
       },
       (streaming) => {
-        this.updateStatusPill(streaming ? "Streaming" : "Idle");
+        if (streaming) {
+          this.btnCallShare.innerHTML = '<span class="btn-icon">🔴</span> Transmitindo (Ao Vivo)';
+          this.btnCallShare.classList.remove("btn-primary");
+          this.btnCallShare.classList.add("btn-secondary");
+
+          // Se estiver na tela da chamada, renderiza o Host Tile na grade
+          if (!this.watchPanel.classList.contains("hidden")) {
+            this.renderHostTile();
+          }
+        } else {
+          this.btnCallShare.innerHTML = '<span class="btn-icon">📺</span> Transmitir Minha Tela';
+          this.btnCallShare.classList.remove("btn-secondary");
+          this.btnCallShare.classList.add("btn-primary");
+          this.removeHostTile();
+        }
+        this.updateStatusPill();
+        this.updateGridLayout();
       }
     );
+
+    // Encaminha pacotes de pré-visualização para o host tile quando ativo na grade
+    this.shareManager.onPreviewStreamEvent = (msg: StreamEvent) => {
+      if (!this.hostTilePlayer) return;
+      if (msg.t === "video") {
+        this.hostTilePlayer.handleVideoFrame(msg.d, msg.k, msg.p);
+      } else if (msg.t === "config") {
+        if (msg.width && msg.height) {
+          this.hostTilePlayer.setDimensions(msg.width, msg.height);
+        }
+        if (msg.codec) {
+          this.hostTilePlayer.configureDecoder(msg.codec);
+        }
+      }
+    };
   }
 
   private bindEvents() {
@@ -185,23 +236,37 @@ class App {
       if (e.key === "Enter") handleSaveNick();
     });
 
-    // Desconectar do stream assistido
-    this.btnStopWatch.addEventListener("click", () => this.stopWatching());
-
-    // Picture-in-Picture (Janela flutuante nativa do sistema)
-    if (this.btnPip) {
-      this.btnPip.addEventListener("click", async () => {
-        if (!this.player) return;
-        try {
-          const active = await this.player.togglePiP();
-          if (this.btnPip) {
-            this.btnPip.textContent = active ? "📌 Sair PiP" : "📌 PiP";
-          }
-        } catch (e) {
-          alert("Picture-in-Picture não suportado ou negado pelo sistema: " + e);
+    // Botão de Transmitir Tela dentro da chamada (Discord style)
+    this.btnCallShare.addEventListener("click", () => {
+      if (this.shareManager.getIsSharing()) {
+        const ticket = this.shareManager.getRoomTicket();
+        if (ticket) {
+          navigator.clipboard.writeText(ticket);
+          alert(`Você já está transmitindo!\nCódigo da Sala copiado para a Área de Transferência:\n\n${ticket}`);
+        } else {
+          alert("Você já está transmitindo ao vivo!");
         }
-      });
-    }
+      } else {
+        this.shareManager.openShareModal();
+      }
+    });
+
+    // Alternar Grade / Foco
+    this.btnCallGridMode.addEventListener("click", () => {
+      if (this.focusedStreamId) {
+        this.clearStreamFocus();
+      } else if (this.activeStreams.size > 0) {
+        const firstId = this.activeStreams.keys().next().value;
+        if (firstId) {
+          this.setStreamFocus(firstId);
+        }
+      } else if (this.hostTileElement) {
+        this.setStreamFocus("host");
+      }
+    });
+
+    // Desconectar de todas as transmissões (Sair da Chamada)
+    this.btnStopAllWatch.addEventListener("click", () => this.stopAllWatching());
 
     // Modo Mini-Player (Compacto & Always on Top)
     const toggleMiniPlayer = async () => {
@@ -234,159 +299,439 @@ class App {
     // Tela cheia
     this.btnFullscreen.addEventListener("click", () => {
       if (!document.fullscreenElement) {
-        this.canvasContainer.requestFullscreen().catch((err) => {
+        this.streamsGridWrapper.requestFullscreen().catch((err) => {
           console.warn("Fullscreen falhou:", err);
         });
       } else {
         document.exitFullscreen();
       }
     });
-
-    // Controle de volume do player
-    this.volumeSlider.addEventListener("input", () => {
-      const vol = parseFloat(this.volumeSlider.value);
-      if (this.player) {
-        this.player.setVolume(vol);
-      }
-      this.btnPlayerMute.textContent = vol === 0 ? "🔇" : "🔊";
-    });
-
-    this.btnPlayerMute.addEventListener("click", () => {
-      if (parseFloat(this.volumeSlider.value) > 0) {
-        this.volumeSlider.dataset.prev = this.volumeSlider.value;
-        this.volumeSlider.value = "0";
-      } else {
-        this.volumeSlider.value = this.volumeSlider.dataset.prev || "1";
-      }
-      this.volumeSlider.dispatchEvent(new Event("input"));
-    });
   }
 
+  /**
+   * Conecta a um amigo (ou código de sala lk-...) e adiciona uma tile à Grade da Chamada.
+   * Não encerra sua própria transmissão se estiver ativo!
+   */
   private async startWatchingPeer(ip: string, nick: string) {
-    // Se estava transmitindo, para primeiro
-    await this.shareManager.stopShare();
+    const streamId = ip.trim();
 
-    const isTicket = ip.startsWith("lk-");
-    const displayHost = isTicket ? "Sala P2P (Internet)" : nick;
-    const displayAddr = isTicket ? "P2P Iroh (Internet Direta)" : ip;
+    // Se já estiver assistindo este stream, foca nele
+    if (this.activeStreams.has(streamId)) {
+      this.setStreamFocus(streamId);
+      return;
+    }
 
-    this.watchHostName.textContent = displayHost;
-    this.watchMetaInfo.textContent = `${displayAddr} • Conectando...`;
-    this.playerOverlay.classList.remove("hidden");
+    const isTicket = streamId.startsWith("lk-");
+    const displayHost = isTicket ? `Amigo (${nick === "Sala P2P" ? "P2P" : nick})` : nick;
+    const displayAddr = isTicket ? "P2P Internet" : streamId;
 
-    // Alterna visualização para o player
+    // Alterna visualização para o Watch Panel da Chamada (sem parar transmissão ativa)
     this.sharePanel.classList.add("hidden");
     this.watchPanel.classList.remove("hidden");
-    this.updateStatusPill("Watching");
 
-    // Inicializa o player de baixa latência
-    if (this.player) {
-      this.player.destroy();
+    // Se estiver transmitindo, assegura que a sua miniatura esteja presente na grade
+    if (this.shareManager.getIsSharing()) {
+      this.renderHostTile();
     }
-    this.player = new StreamPlayer(
-      this.streamCanvas,
-      this.playerOverlay,
+
+    // Cria o elemento Tile na grade
+    const tile = document.createElement("div");
+    tile.className = "stream-tile";
+    tile.dataset.streamId = streamId;
+
+    tile.innerHTML = `
+      <div class="stream-tile-header">
+        <div class="tile-user-info">
+          <span class="status-dot red"></span>
+          <span class="tile-user-nick" title="${this.escapeHtml(displayHost)}">${this.escapeHtml(displayHost)}</span>
+          <span class="tile-addr-badge" title="${displayAddr}">${displayAddr}</span>
+        </div>
+        <div class="tile-stats-group">
+          <span class="badge-tile-stat res-tag">0x0</span>
+          <span class="badge-tile-stat fps-tag">60 FPS</span>
+          <span class="badge-tile-stat codec codec-tag">H.264</span>
+          <span class="badge-tile-stat rtt rtt-tag">RTT: -</span>
+        </div>
+        <div class="tile-actions">
+          <button class="btn-tile-action btn-tile-pip" title="Picture-in-Picture">📌</button>
+          <button class="btn-tile-action btn-tile-focus" title="Focar/Expandir este stream">⛶</button>
+          <button class="btn-tile-action btn-tile-close" title="Desconectar desta transmissão">✕</button>
+        </div>
+      </div>
+
+      <div class="stream-tile-canvas-wrap">
+        <canvas class="stream-tile-canvas"></canvas>
+        <div class="player-overlay">
+          <div class="spinner"></div>
+          <div class="overlay-text">Conectando à transmissão...</div>
+        </div>
+      </div>
+
+      <div class="stream-tile-footer">
+        <div class="tile-volume-control">
+          <button class="btn-icon-xs btn-tile-mute" title="Mutar áudio deste amigo">🔊</button>
+          <input type="range" class="tile-volume-slider" min="0" max="1" step="0.05" value="1" />
+          <span class="volume-val-label">100%</span>
+        </div>
+        <div class="tile-loss-tag">Perda: 0%</div>
+      </div>
+    `;
+
+    const canvas = tile.querySelector("canvas") as HTMLCanvasElement;
+    const overlay = tile.querySelector(".player-overlay") as HTMLElement;
+    const resTag = tile.querySelector(".res-tag") as HTMLElement;
+    const fpsTag = tile.querySelector(".fps-tag") as HTMLElement;
+    const codecTag = tile.querySelector(".codec-tag") as HTMLElement;
+    const rttTag = tile.querySelector(".rtt-tag") as HTMLElement;
+    const lossTag = tile.querySelector(".tile-loss-tag") as HTMLElement;
+    const volumeSlider = tile.querySelector(".tile-volume-slider") as HTMLInputElement;
+    const btnMute = tile.querySelector(".btn-tile-mute") as HTMLButtonElement;
+    const btnPip = tile.querySelector(".btn-tile-pip") as HTMLButtonElement;
+    const btnFocus = tile.querySelector(".btn-tile-focus") as HTMLButtonElement;
+    const btnClose = tile.querySelector(".btn-tile-close") as HTMLButtonElement;
+
+    // Inicializa o StreamPlayer dedicado para este tile
+    const player = new StreamPlayer(
+      canvas,
+      overlay,
       (stats) => {
-        this.playerResTag.textContent = `${stats.width}x${stats.height}`;
-        this.playerFpsTag.textContent = `${stats.fps} FPS`;
+        resTag.textContent = `${stats.width}x${stats.height}`;
+        fpsTag.textContent = `${stats.fps} FPS`;
       },
       true,
       () => {
-        invoke("request_stream_keyframe").catch(() => {});
+        invoke("request_stream_keyframe", { streamId }).catch(() => {});
       }
     );
 
-    // Canal Tauri v2 IPC para receber pacotes de vídeo e áudio
+    // Canal Tauri v2 IPC para pacotes de vídeo e áudio deste stream
     const onEvent = new Channel<StreamEvent>();
     onEvent.onmessage = (msg: StreamEvent) => {
-      if (!this.player) return;
-
       switch (msg.t) {
         case "video":
-          this.player.handleVideoFrame(msg.d, msg.k, msg.p);
+          player.handleVideoFrame(msg.d, msg.k, msg.p);
           break;
         case "audio":
-          this.player.handleAudioChunk(msg.d);
+          player.handleAudioChunk(msg.d);
           break;
-        case "config": {
+        case "config":
           if (msg.width && msg.height) {
-            this.player.setDimensions(msg.width, msg.height);
+            player.setDimensions(msg.width, msg.height);
+            resTag.textContent = `${msg.width}x${msg.height}`;
+          }
+          if (msg.fps) {
+            fpsTag.textContent = `${msg.fps} FPS`;
           }
           if (msg.codec) {
-            this.player.configureDecoder(msg.codec);
+            player.configureDecoder(msg.codec);
+            codecTag.textContent = msg.codec.toUpperCase();
           }
-          const codecBadge = (msg.codec || "H.264").toUpperCase();
-          this.watchMetaInfo.textContent = `${displayAddr} • ${msg.width}x${msg.height} @ ${msg.fps} FPS (${codecBadge})`;
-          this.playerResTag.textContent = `${msg.width}x${msg.height}`;
           break;
-        }
         case "telemetry":
-          this.playerFpsTag.textContent = `${msg.fps} FPS`;
-          if (this.playerRttTag) {
-            this.playerRttTag.textContent = `RTT: ${msg.rtt_ms}ms`;
+          fpsTag.textContent = `${msg.fps} FPS`;
+          rttTag.textContent = `${msg.rtt_ms}ms`;
+          const fecInfo = msg.fec_recovered ? ` • FEC: ${msg.fec_recovered}` : "";
+          lossTag.textContent = `Perda: ${msg.loss_pct.toFixed(1)}%${fecInfo}`;
+          if (msg.loss_pct > 2.0 || msg.dropped_ref > 0) {
+            lossTag.classList.add("warning");
+          } else {
+            lossTag.classList.remove("warning");
           }
-          if (this.playerLossTag) {
-            const fecInfo = (msg.fec_recovered && msg.fec_recovered > 0) ? ` • FEC: ${msg.fec_recovered}` : "";
-            this.playerLossTag.textContent = `Perda: ${msg.loss_pct.toFixed(1)}% (NACKs: ${msg.nacks_recovered}${fecInfo})`;
-            if (msg.loss_pct > 2.0 || msg.dropped_ref > 0) {
-              this.playerLossTag.classList.add("warning");
-            } else {
-              this.playerLossTag.classList.remove("warning");
-            }
-          }
-          break;
-        case "audio_state":
           break;
         case "ended":
-          alert(`A transmissão foi encerrada: ${msg.reason}`);
-          this.stopWatching();
+          this.stopWatchingPeer(streamId);
           break;
       }
     };
 
+    // Controle de volume individual (estilo Discord)
+    volumeSlider.addEventListener("input", () => {
+      const vol = parseFloat(volumeSlider.value);
+      player.setVolume(vol);
+      btnMute.textContent = vol === 0 ? "🔇" : "🔊";
+      const lbl = tile.querySelector(".volume-val-label");
+      if (lbl) lbl.textContent = `${Math.round(vol * 100)}%`;
+    });
+
+    btnMute.addEventListener("click", () => {
+      if (parseFloat(volumeSlider.value) > 0) {
+        volumeSlider.dataset.prev = volumeSlider.value;
+        volumeSlider.value = "0";
+      } else {
+        volumeSlider.value = volumeSlider.dataset.prev || "1";
+      }
+      volumeSlider.dispatchEvent(new Event("input"));
+    });
+
+    // Foco / Teatro
+    btnFocus.addEventListener("click", () => {
+      this.toggleFocusStream(streamId);
+    });
+
+    // PiP
+    btnPip.addEventListener("click", async () => {
+      try {
+        await player.togglePiP();
+      } catch (e) {
+        alert("Picture-in-Picture não suportado: " + e);
+      }
+    });
+
+    // Fechar stream
+    btnClose.addEventListener("click", () => {
+      this.stopWatchingPeer(streamId);
+    });
+
+    // Registra o stream ativo
+    const activeStream: ActiveStream = {
+      id: streamId,
+      nick: displayHost,
+      addr: displayAddr,
+      player,
+      element: tile,
+      resTag,
+      fpsTag,
+      codecTag,
+      rttTag,
+      lossTag,
+      volumeSlider,
+      btnMute,
+    };
+    this.activeStreams.set(streamId, activeStream);
+
+    this.streamsGrid.appendChild(tile);
+    this.updateGridLayout();
+    this.updateStatusPill();
+
     try {
-      await invoke("watch_peer", { peerIp: ip, onEvent });
-      this.watchMetaInfo.textContent = `${displayAddr} • Transmissão Ativa`;
+      await invoke("watch_peer", { streamId, peerIp: streamId, onEvent });
     } catch (e) {
-      alert("Falha ao conectar na transmissão: " + e);
-      this.stopWatching();
+      alert(`Falha ao conectar em ${displayHost}: ` + e);
+      this.stopWatchingPeer(streamId);
     }
   }
 
-  private async stopWatching() {
-    try {
-      await invoke("stop_watching");
-    } catch (e) {
-      console.warn("Erro ao desconectar:", e);
-    } finally {
-      if (this.isMiniPlayer) {
-        this.isMiniPlayer = false;
-        document.body.classList.remove("mini-player-active");
-        try {
-          const win = getCurrentWindow();
-          await win.setAlwaysOnTop(false);
-          await win.setSize(new LogicalSize(1100, 720));
-        } catch (_) {}
-      }
-      if (this.btnPip) {
-        this.btnPip.textContent = "📌 PiP";
-      }
-      if (this.btnMiniPlayer) {
-        this.btnMiniPlayer.textContent = "🪟 Mini-Player";
-      }
-      if (this.player) {
-        this.player.destroy();
-        this.player = null;
-      }
-      if (this.playerRttTag) this.playerRttTag.textContent = "RTT: -";
-      if (this.playerLossTag) {
-        this.playerLossTag.textContent = "Perda: 0%";
-        this.playerLossTag.classList.remove("warning");
-      }
-      this.watchPanel.classList.add("hidden");
-      this.sharePanel.classList.remove("hidden");
-      this.updateStatusPill("Idle");
+  /**
+   * Encerra a visualização de um stream específico.
+   */
+  private async stopWatchingPeer(streamId: string) {
+    const stream = this.activeStreams.get(streamId);
+    if (stream) {
+      stream.player.destroy();
+      stream.element.remove();
+      this.activeStreams.delete(streamId);
     }
+
+    try {
+      await invoke("stop_watching", { streamId });
+    } catch (e) {
+      console.warn("Erro ao desconectar stream:", e);
+    }
+
+    if (this.focusedStreamId === streamId) {
+      this.clearStreamFocus();
+    }
+
+    this.updateGridLayout();
+    this.updateStatusPill();
+
+    // Se não houver mais nenhum stream e não estiver transmitindo, volta para a tela inicial
+    if (this.activeStreams.size === 0 && !this.shareManager.getIsSharing()) {
+      this.returnToSharePanel();
+    }
+  }
+
+  /**
+   * Desconecta de todas as transmissões assistidas.
+   */
+  private async stopAllWatching() {
+    try {
+      await invoke("stop_watching", { streamId: null });
+    } catch (e) {
+      console.warn("Erro ao parar todos os streams:", e);
+    }
+
+    for (const stream of this.activeStreams.values()) {
+      stream.player.destroy();
+      stream.element.remove();
+    }
+    this.activeStreams.clear();
+    this.clearStreamFocus();
+
+    if (this.isMiniPlayer) {
+      this.isMiniPlayer = false;
+      document.body.classList.remove("mini-player-active");
+      try {
+        const win = getCurrentWindow();
+        await win.setAlwaysOnTop(false);
+        await win.setSize(new LogicalSize(1100, 720));
+      } catch (_) {}
+    }
+
+    this.updateGridLayout();
+    this.updateStatusPill();
+
+    if (!this.shareManager.getIsSharing()) {
+      this.returnToSharePanel();
+    }
+  }
+
+  private returnToSharePanel() {
+    this.watchPanel.classList.add("hidden");
+    this.sharePanel.classList.remove("hidden");
+  }
+
+  /**
+   * Renderiza a miniatura ao vivo do próprio anfitrião na grade de chamadas.
+   */
+  private renderHostTile() {
+    if (this.hostTileElement) return;
+
+    const tile = document.createElement("div");
+    tile.className = "stream-tile host-stream-tile";
+    tile.id = "host-stream-tile";
+
+    tile.innerHTML = `
+      <div class="stream-tile-header">
+        <div class="tile-user-info">
+          <span class="status-dot red"></span>
+          <span class="tile-user-nick">Sua Transmissão (Você)</span>
+          <span class="badge-host-pill">Transmitindo</span>
+        </div>
+        <div class="tile-stats-group">
+          <span class="badge-tile-stat" id="host-tile-viewers">👥 Live Ativa</span>
+        </div>
+        <div class="tile-actions">
+          <button class="btn-tile-action btn-tile-focus" title="Focar seu stream">⛶</button>
+        </div>
+      </div>
+
+      <div class="stream-tile-canvas-wrap">
+        <canvas id="host-stream-tile-canvas" class="stream-tile-canvas"></canvas>
+      </div>
+
+      <div class="stream-tile-footer host-footer">
+        <button class="btn-primary btn-xs" id="btn-host-tile-copy">📋 Copiar Código da Sala</button>
+        <button class="btn-secondary btn-xs" id="btn-host-tile-mute">🔇 Mutar Som</button>
+        <button class="btn-danger btn-xs" id="btn-host-tile-stop">⏹ Encerrar Transmissão</button>
+      </div>
+    `;
+
+    const canvas = tile.querySelector("#host-stream-tile-canvas") as HTMLCanvasElement;
+    const btnCopy = tile.querySelector("#btn-host-tile-copy") as HTMLButtonElement;
+    const btnMute = tile.querySelector("#btn-host-tile-mute") as HTMLButtonElement;
+    const btnStop = tile.querySelector("#btn-host-tile-stop") as HTMLButtonElement;
+    const btnFocus = tile.querySelector(".btn-tile-focus") as HTMLButtonElement;
+
+    // StreamPlayer sem áudio para espelho local
+    this.hostTilePlayer = new StreamPlayer(canvas, null, undefined, false);
+
+    btnCopy.addEventListener("click", () => {
+      const ticket = this.shareManager.getRoomTicket();
+      if (!ticket) return;
+      navigator.clipboard.writeText(ticket);
+      btnCopy.textContent = "✅ Copiado!";
+      setTimeout(() => (btnCopy.textContent = "📋 Copiar Código da Sala"), 2000);
+    });
+
+    btnMute.addEventListener("click", async () => {
+      const muted = await this.shareManager.toggleAudioMute();
+      btnMute.textContent = muted ? "🔊 Desmutar" : "🔇 Mutar Som";
+    });
+
+    btnStop.addEventListener("click", () => {
+      this.shareManager.stopShare();
+    });
+
+    btnFocus.addEventListener("click", () => {
+      this.toggleFocusStream("host");
+    });
+
+    this.hostTileElement = tile;
+    this.streamsGrid.appendChild(tile);
+    this.updateGridLayout();
+  }
+
+  private removeHostTile() {
+    if (this.hostTilePlayer) {
+      this.hostTilePlayer.destroy();
+      this.hostTilePlayer = null;
+    }
+    if (this.hostTileElement) {
+      this.hostTileElement.remove();
+      this.hostTileElement = null;
+    }
+    if (this.focusedStreamId === "host") {
+      this.clearStreamFocus();
+    }
+    this.updateGridLayout();
+  }
+
+  private toggleFocusStream(id: string) {
+    if (this.focusedStreamId === id) {
+      this.clearStreamFocus();
+    } else {
+      this.setStreamFocus(id);
+    }
+  }
+
+  private setStreamFocus(id: string) {
+    this.focusedStreamId = id;
+    this.streamsGrid.classList.add("has-focused");
+    this.btnCallGridMode.textContent = "⛶ Foco Ativo (Voltar à Grade)";
+
+    // Remove foco anterior
+    this.streamsGrid.querySelectorAll(".stream-tile").forEach((t) => t.classList.remove("focused"));
+
+    if (id === "host") {
+      if (this.hostTileElement) this.hostTileElement.classList.add("focused");
+    } else {
+      const stream = this.activeStreams.get(id);
+      if (stream) stream.element.classList.add("focused");
+    }
+  }
+
+  private clearStreamFocus() {
+    this.focusedStreamId = null;
+    this.streamsGrid.classList.remove("has-focused");
+    this.streamsGrid.querySelectorAll(".stream-tile").forEach((t) => t.classList.remove("focused"));
+    this.btnCallGridMode.textContent = "🪟 Grade";
+  }
+
+  /**
+   * Atualiza a responsividade da grade de vídeos conforme o número de streams conectados.
+   */
+  private updateGridLayout() {
+    const friendCount = this.activeStreams.size;
+    const hasHost = this.hostTileElement !== null;
+    const totalTiles = friendCount + (hasHost ? 1 : 0);
+
+    // Atualiza badge de contagem
+    if (totalTiles === 0) {
+      this.streamsCountBadge.textContent = "0 transmissões";
+    } else if (hasHost && friendCount > 0) {
+      this.streamsCountBadge.textContent = `${friendCount} ${friendCount === 1 ? "amigo" : "amigos"} + sua live`;
+    } else if (hasHost) {
+      this.streamsCountBadge.textContent = "Sua live";
+    } else {
+      this.streamsCountBadge.textContent = `${friendCount} ${friendCount === 1 ? "stream ativo" : "streams ativos"}`;
+    }
+
+    // Configura classes de grade
+    this.streamsGrid.classList.remove("count-1", "count-2", "count-3", "count-4", "count-many");
+    if (totalTiles <= 1) {
+      this.streamsGrid.classList.add("count-1");
+    } else if (totalTiles === 2) {
+      this.streamsGrid.classList.add("count-2");
+    } else if (totalTiles <= 4) {
+      this.streamsGrid.classList.add("count-4");
+    } else {
+      this.streamsGrid.classList.add("count-many");
+    }
+  }
+
+  private escapeHtml(str: string): string {
+    return str.replace(/[&<>'"]/g, (c) => `&#${c.charCodeAt(0)};`);
   }
 }
 

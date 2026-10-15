@@ -23,6 +23,23 @@ export interface StreamStats {
   nacks_served: number;
 }
 
+export interface ModalShareElements {
+  modalBackdrop: HTMLElement;
+  btnClose: HTMLButtonElement;
+  btnCancel: HTMLButtonElement;
+  btnStart: HTMLButtonElement;
+  tabButtons: NodeListOf<HTMLButtonElement>;
+  sourcesGrid: HTMLElement;
+  sourcePreviewImg: HTMLImageElement;
+  sourcePreviewPlaceholder: HTMLElement;
+  btnRefreshPreview: HTMLButtonElement;
+  codecSelect: HTMLSelectElement;
+  resolutionSelect: HTMLSelectElement;
+  fpsSelect: HTMLSelectElement;
+  bitrateSelect: HTMLSelectElement;
+  audioCheckbox: HTMLInputElement;
+}
+
 export interface ShareManagerElements {
   sourcesGrid: HTMLElement;
   btnRefresh: HTMLButtonElement;
@@ -51,6 +68,7 @@ export interface ShareManagerElements {
   roomTicketBox?: HTMLElement;
   shareTicketInput?: HTMLInputElement;
   btnCopyTicket?: HTMLButtonElement;
+  modal?: ModalShareElements;
 }
 
 export class ShareManager {
@@ -82,6 +100,8 @@ export class ShareManager {
   private sourcePreviewPlaceholder: HTMLElement | null = null;
   private btnRefreshPreview: HTMLButtonElement | null = null;
   private currentRoomTicket: string | null = null;
+  private modal?: ModalShareElements;
+  public onPreviewStreamEvent?: (msg: StreamEvent) => void;
 
   private currentSources: SourceInfo[] = [];
   private activeTab: "monitors" | "windows" = "monitors";
@@ -123,6 +143,7 @@ export class ShareManager {
     this.roomTicketBox = elements.roomTicketBox || null;
     this.shareTicketInput = elements.shareTicketInput || null;
     this.btnCopyTicket = elements.btnCopyTicket || null;
+    this.modal = elements.modal;
     this.onStatusChange = onStatusChange;
 
     this.bindEvents();
@@ -178,20 +199,70 @@ export class ShareManager {
         }
       });
     }
+
+    if (this.modal) {
+      this.modal.btnClose.addEventListener("click", () => this.closeShareModal());
+      this.modal.btnCancel.addEventListener("click", () => this.closeShareModal());
+      this.modal.btnStart.addEventListener("click", () => this.startShare(true));
+      this.modal.btnRefreshPreview.addEventListener("click", () => {
+        if (this.selectedSourceId !== null) {
+          this.updateSourceSnapshot(this.selectedSourceId);
+        }
+      });
+      this.modal.tabButtons.forEach((tab) => {
+        tab.addEventListener("click", () => {
+          this.tabButtons.forEach((t) => t.classList.remove("active"));
+          this.modal?.tabButtons.forEach((t) => t.classList.remove("active"));
+          tab.classList.add("active");
+          this.activeTab = tab.dataset.tab as "monitors" | "windows";
+          this.renderSources();
+        });
+      });
+    }
+  }
+
+  public openShareModal() {
+    if (!this.modal) return;
+    this.modal.resolutionSelect.value = this.resolutionSelect.value;
+    if (this.fpsSelect && this.modal.fpsSelect) this.modal.fpsSelect.value = this.fpsSelect.value;
+    if (this.bitrateSelect && this.modal.bitrateSelect) this.modal.bitrateSelect.value = this.bitrateSelect.value;
+    if (this.codecSelect && this.modal.codecSelect) this.modal.codecSelect.value = this.codecSelect.value;
+    this.modal.audioCheckbox.checked = this.audioCheckbox.checked;
+
+    this.modal.modalBackdrop.classList.remove("hidden");
+    this.refreshSources();
+  }
+
+  public closeShareModal() {
+    if (this.modal) {
+      this.modal.modalBackdrop.classList.add("hidden");
+    }
   }
 
   public async updateSourceSnapshot(sourceId: number) {
-    if (!this.sourcePreviewImg) return;
     try {
       if (this.sourcePreviewPlaceholder) {
         this.sourcePreviewPlaceholder.textContent = "Carregando miniatura...";
         this.sourcePreviewPlaceholder.classList.remove("hidden");
       }
+      if (this.modal?.sourcePreviewPlaceholder) {
+        this.modal.sourcePreviewPlaceholder.textContent = "Carregando miniatura...";
+        this.modal.sourcePreviewPlaceholder.classList.remove("hidden");
+      }
       const dataUrl = await invoke<string>("get_source_snapshot", { sourceId });
-      this.sourcePreviewImg.src = dataUrl;
-      this.sourcePreviewImg.classList.remove("hidden");
+      if (this.sourcePreviewImg) {
+        this.sourcePreviewImg.src = dataUrl;
+        this.sourcePreviewImg.classList.remove("hidden");
+      }
       if (this.sourcePreviewPlaceholder) {
         this.sourcePreviewPlaceholder.classList.add("hidden");
+      }
+      if (this.modal?.sourcePreviewImg) {
+        this.modal.sourcePreviewImg.src = dataUrl;
+        this.modal.sourcePreviewImg.classList.remove("hidden");
+      }
+      if (this.modal?.sourcePreviewPlaceholder) {
+        this.modal.sourcePreviewPlaceholder.classList.add("hidden");
       }
     } catch (e) {
       console.warn("Falha ao obter miniatura da fonte:", e);
@@ -199,8 +270,15 @@ export class ShareManager {
         this.sourcePreviewPlaceholder.textContent = "Prévia indisponível para esta fonte";
         this.sourcePreviewPlaceholder.classList.remove("hidden");
       }
+      if (this.modal?.sourcePreviewPlaceholder) {
+        this.modal.sourcePreviewPlaceholder.textContent = "Prévia indisponível para esta fonte";
+        this.modal.sourcePreviewPlaceholder.classList.remove("hidden");
+      }
       if (this.sourcePreviewImg) {
         this.sourcePreviewImg.classList.add("hidden");
+      }
+      if (this.modal?.sourcePreviewImg) {
+        this.modal.sourcePreviewImg.classList.add("hidden");
       }
     }
   }
@@ -218,6 +296,9 @@ export class ShareManager {
   public async refreshSources() {
     try {
       this.sourcesGrid.innerHTML = '<div class="loading-sources">Carregando fontes disponíveis...</div>';
+      if (this.modal?.sourcesGrid) {
+        this.modal.sourcesGrid.innerHTML = '<div class="loading-sources">Carregando fontes disponíveis...</div>';
+      }
       const sources = await invoke<SourceInfo[]>("get_sources");
       this.currentSources = sources;
 
@@ -238,6 +319,9 @@ export class ShareManager {
       this.renderSources();
     } catch (e) {
       this.sourcesGrid.innerHTML = `<div class="empty-peers">Erro ao listar fontes: ${e}</div>`;
+      if (this.modal?.sourcesGrid) {
+        this.modal.sourcesGrid.innerHTML = `<div class="empty-peers">Erro ao listar fontes: ${e}</div>`;
+      }
     }
   }
 
@@ -247,8 +331,15 @@ export class ShareManager {
       return s.kind === "Window";
     });
 
-    if (filtered.length === 0) {
-      this.sourcesGrid.innerHTML = `
+    this.renderSourceCardsInto(this.sourcesGrid, filtered);
+    if (this.modal?.sourcesGrid) {
+      this.renderSourceCardsInto(this.modal.sourcesGrid, filtered);
+    }
+  }
+
+  private renderSourceCardsInto(grid: HTMLElement, sources: SourceInfo[]) {
+    if (sources.length === 0) {
+      grid.innerHTML = `
         <div class="empty-peers">
           Nenhuma fonte do tipo "${this.activeTab === "monitors" ? "Monitores" : "Janelas"}" encontrada.
         </div>
@@ -256,8 +347,8 @@ export class ShareManager {
       return;
     }
 
-    this.sourcesGrid.innerHTML = "";
-    for (const src of filtered) {
+    grid.innerHTML = "";
+    for (const src of sources) {
       const card = document.createElement("div");
       const isSelected = src.id === this.selectedSourceId;
       card.className = `source-card ${isSelected ? "selected" : ""}`;
@@ -282,9 +373,15 @@ export class ShareManager {
           autoOpt.textContent = `✨ Taxa do Monitor (${src.refresh_rate} Hz)`;
         }
       }
+      if (isSelected && this.modal?.fpsSelect && src.refresh_rate) {
+        const autoOpt = this.modal.fpsSelect.querySelector('option[value="auto"]');
+        if (autoOpt) {
+          autoOpt.textContent = `✨ Taxa do Monitor (${src.refresh_rate} Hz)`;
+        }
+      }
 
       card.addEventListener("click", () => {
-        if (this.isSharing) return; // não troca em live sem reiniciar
+        if (this.isSharing) return;
         this.selectedSourceId = src.id;
         this.updateSourceSnapshot(src.id);
         if (this.fpsSelect && src.refresh_rate) {
@@ -293,25 +390,37 @@ export class ShareManager {
             autoOpt.textContent = `✨ Taxa do Monitor (${src.refresh_rate} Hz)`;
           }
         }
+        if (this.modal?.fpsSelect && src.refresh_rate) {
+          const autoOpt = this.modal.fpsSelect.querySelector('option[value="auto"]');
+          if (autoOpt) {
+            autoOpt.textContent = `✨ Taxa do Monitor (${src.refresh_rate} Hz)`;
+          }
+        }
         this.renderSources();
       });
 
-      this.sourcesGrid.appendChild(card);
+      grid.appendChild(card);
     }
   }
 
-  private async startShare() {
+  public async startShare(fromModal: boolean = false) {
     if (this.selectedSourceId === null) {
       alert("Selecione uma tela ou janela para transmitir.");
       return;
     }
 
-    const preset = this.resolutionSelect.value;
-    const audioEnabled = this.audioCheckbox.checked;
+    const resSelect = fromModal && this.modal ? this.modal.resolutionSelect : this.resolutionSelect;
+    const audCheck = fromModal && this.modal ? this.modal.audioCheckbox : this.audioCheckbox;
+    const fSelect = fromModal && this.modal ? this.modal.fpsSelect : this.fpsSelect;
+    const bitSelect = fromModal && this.modal ? this.modal.bitrateSelect : this.bitrateSelect;
+    const codSelect = fromModal && this.modal ? this.modal.codecSelect : this.codecSelect;
+
+    const preset = resSelect.value;
+    const audioEnabled = audCheck.checked;
 
     let fpsTarget: number | null = null;
-    if (this.fpsSelect) {
-      const val = this.fpsSelect.value;
+    if (fSelect) {
+      const val = fSelect.value;
       if (val === "auto") {
         fpsTarget = null;
       } else if (val === "unlocked") {
@@ -322,11 +431,15 @@ export class ShareManager {
     }
 
     let bitrateKbps: number | null = null;
-    if (this.bitrateSelect) {
-      const bVal = this.bitrateSelect.value;
+    if (bitSelect) {
+      const bVal = bitSelect.value;
       if (bVal !== "auto") {
         bitrateKbps = parseInt(bVal, 10) || null;
       }
+    }
+
+    if (fromModal) {
+      this.closeShareModal();
     }
 
     try {
@@ -351,20 +464,24 @@ export class ShareManager {
       // Cria o canal Tauri v2 para o feed de vídeo espelhado em tempo real
       const onPreview = new Channel<StreamEvent>();
       onPreview.onmessage = (msg: StreamEvent) => {
-        if (!this.previewPlayer) return;
-        if (msg.t === "video") {
-          this.previewPlayer.handleVideoFrame(msg.d, msg.k, msg.p);
-        } else if (msg.t === "config") {
-          if (msg.width && msg.height) {
-            this.previewPlayer.setDimensions(msg.width, msg.height);
+        if (this.previewPlayer) {
+          if (msg.t === "video") {
+            this.previewPlayer.handleVideoFrame(msg.d, msg.k, msg.p);
+          } else if (msg.t === "config") {
+            if (msg.width && msg.height) {
+              this.previewPlayer.setDimensions(msg.width, msg.height);
+            }
+            if (msg.codec) {
+              this.previewPlayer.configureDecoder(msg.codec);
+            }
           }
-          if (msg.codec) {
-            this.previewPlayer.configureDecoder(msg.codec);
-          }
+        }
+        if (this.onPreviewStreamEvent) {
+          this.onPreviewStreamEvent(msg);
         }
       };
 
-      const codec = this.codecSelect ? this.codecSelect.value : "auto";
+      const codec = codSelect ? codSelect.value : "auto";
 
       const info = await invoke<ShareInfo>("start_share", {
         sourceId: this.selectedSourceId,
@@ -429,6 +546,33 @@ export class ShareManager {
       this.btnStart.disabled = false;
       this.btnStart.innerHTML = '<span class="btn-icon">▶</span> Iniciar Transmissão';
     }
+  }
+
+  public getIsSharing(): boolean {
+    return this.isSharing;
+  }
+
+  public getRoomTicket(): string | null {
+    return this.currentRoomTicket;
+  }
+
+  public getIsAudioMuted(): boolean {
+    return this.isAudioMuted;
+  }
+
+  public async toggleAudioMute(): Promise<boolean> {
+    this.isAudioMuted = !this.isAudioMuted;
+    try {
+      await invoke("set_audio_muted", { muted: this.isAudioMuted });
+      this.updateAudioTag();
+    } catch (e) {
+      console.warn("Erro ao alternar mudo:", e);
+    }
+    return this.isAudioMuted;
+  }
+
+  public getSelectedSourceId(): number | null {
+    return this.selectedSourceId;
   }
 
   private startStatsPolling() {

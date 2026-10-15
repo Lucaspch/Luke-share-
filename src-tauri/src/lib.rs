@@ -56,7 +56,7 @@ pub fn run() {
         peer_table,
         control_server,
         active_sender: Mutex::new(None),
-        active_receiver: Mutex::new(None),
+        active_receivers: Mutex::new(std::collections::HashMap::new()),
         shutdown_discovery,
     };
 

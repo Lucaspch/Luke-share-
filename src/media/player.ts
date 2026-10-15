@@ -17,6 +17,7 @@ export type StreamEvent =
       packets_rx: number;
       loss_pct: number;
       nacks_recovered: number;
+      fec_recovered?: number;
       dropped_ref: number;
       fps: number;
     }

@@ -26,8 +26,21 @@ pub struct AppState {
     pub peer_table: Arc<PeerTable>,
     pub control_server: Arc<ControlServer>,
     pub active_sender: Mutex<Option<SenderPipeline>>,
-    pub active_receiver: Mutex<Option<ReceiverPipeline>>,
+    pub active_receivers: Mutex<std::collections::HashMap<String, ReceiverPipeline>>,
     pub shutdown_discovery: Arc<Notify>,
+}
+
+fn update_local_status(state: &AppState) {
+    let is_streaming = state.active_sender.lock().is_some();
+    let is_watching = !state.active_receivers.lock().is_empty();
+    let status = if is_streaming {
+        PeerStatus::Streaming
+    } else if is_watching {
+        PeerStatus::Watching
+    } else {
+        PeerStatus::Idle
+    };
+    state.local_peer.set_status(status);
 }
 
 #[derive(Serialize)]
@@ -238,7 +251,7 @@ pub async fn start_share(
     sender.request_keyframe();
 
     *state.active_sender.lock() = Some(sender);
-    state.local_peer.set_status(PeerStatus::Streaming);
+    update_local_status(&state);
 
     Ok(ShareInfo {
         width: out_res.0,
@@ -256,7 +269,7 @@ pub fn stop_share(state: State<'_, AppState>) -> Result<(), String> {
         sender.stop();
     }
     state.control_server.stop();
-    state.local_peer.set_status(PeerStatus::Idle);
+    update_local_status(&state);
     Ok(())
 }
 
@@ -277,13 +290,14 @@ pub fn get_room_ticket(state: State<'_, AppState>) -> Result<Option<String>, Str
 #[tauri::command]
 pub async fn watch_peer(
     state: State<'_, AppState>,
+    stream_id: String,
     peer_ip: String,
     on_event: Channel<StreamEvent>,
 ) -> Result<(), String> {
-    // Encerra qualquer visualização anterior (solta o lock antes do await)
+    // Se já houver um receiver com esse stream_id, encerra ele primeiro
     let prev_opt = {
-        let mut cur = state.active_receiver.lock();
-        cur.take()
+        let mut cur = state.active_receivers.lock();
+        cur.remove(&stream_id)
     };
     if let Some(mut prev) = prev_opt {
         prev.stop().await;
@@ -313,8 +327,8 @@ pub async fn watch_peer(
         .await
         .map_err(|e| format!("Falha ao conectar via P2P Nativo: {e:#}"))?;
 
-        *state.active_receiver.lock() = Some(receiver);
-        state.local_peer.set_status(PeerStatus::Watching);
+        state.active_receivers.lock().insert(stream_id, receiver);
+        update_local_status(&state);
         return Ok(());
     }
 
@@ -333,29 +347,47 @@ pub async fn watch_peer(
     .await
     .map_err(|e| format!("Falha ao conectar com o anfitrião: {e:#}"))?;
 
-    *state.active_receiver.lock() = Some(receiver);
-    state.local_peer.set_status(PeerStatus::Watching);
+    state.active_receivers.lock().insert(stream_id, receiver);
+    update_local_status(&state);
     Ok(())
 }
 
 #[tauri::command]
-pub async fn stop_watching(state: State<'_, AppState>) -> Result<(), String> {
-    // Solta o lock do Mutex antes de chamar await
-    let receiver_opt = {
-        let mut cur = state.active_receiver.lock();
-        cur.take()
+pub async fn stop_watching(
+    state: State<'_, AppState>,
+    stream_id: Option<String>,
+) -> Result<(), String> {
+    let to_stop: Vec<ReceiverPipeline> = {
+        let mut map = state.active_receivers.lock();
+        if let Some(ref id) = stream_id {
+            map.remove(id).into_iter().collect()
+        } else {
+            map.drain().map(|(_, r)| r).collect()
+        }
     };
-    if let Some(mut receiver) = receiver_opt {
-        receiver.stop().await;
+
+    for mut r in to_stop {
+        r.stop().await;
     }
-    state.local_peer.set_status(PeerStatus::Idle);
+
+    update_local_status(&state);
     Ok(())
 }
 
 #[tauri::command]
-pub fn request_stream_keyframe(state: State<'_, AppState>) -> Result<(), String> {
-    if let Some(recv) = state.active_receiver.lock().as_ref() {
-        recv.request_keyframe();
+pub fn request_stream_keyframe(
+    state: State<'_, AppState>,
+    stream_id: Option<String>,
+) -> Result<(), String> {
+    let receivers = state.active_receivers.lock();
+    if let Some(ref id) = stream_id {
+        if let Some(recv) = receivers.get(id) {
+            recv.request_keyframe();
+        }
+    } else {
+        for recv in receivers.values() {
+            recv.request_keyframe();
+        }
     }
     Ok(())
 }
