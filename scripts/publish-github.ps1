@@ -31,7 +31,8 @@ try {
         prerelease = $false
     } | ConvertTo-Json -Depth 5
 
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases" -Method Post -Headers $headers -Body $body -ContentType "application/json"
+    $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
+    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases" -Method Post -Headers $headers -Body $bodyBytes -ContentType "application/json; charset=utf-8"
     Write-Host "Release criada com sucesso! (ID: $($release.id))" -ForegroundColor Green
 }
 
