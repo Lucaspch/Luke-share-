@@ -19,11 +19,7 @@ interface ActiveStream {
   addr: string;
   player: StreamPlayer;
   element: HTMLElement;
-  resTag: HTMLElement;
-  fpsTag: HTMLElement;
-  codecTag: HTMLElement;
-  rttTag: HTMLElement;
-  lossTag: HTMLElement;
+  statBadge: HTMLElement;
   volumeSlider: HTMLInputElement;
   btnMute: HTMLButtonElement;
 }
@@ -184,24 +180,32 @@ class App {
       },
       (streaming) => {
         if (streaming) {
-          this.btnCallShare.innerHTML = '<span class="btn-icon">🔴</span> Transmitindo (Ao Vivo)';
-          this.btnCallShare.classList.remove("btn-primary");
-          this.btnCallShare.classList.add("btn-secondary");
+          this.btnCallShare.classList.add("active-share");
+          this.btnCallShare.innerHTML = '<span class="call-icon">🔴</span>';
+          this.btnCallShare.title = "Você está transmitindo tela (Clique para ver/copiar código)";
 
           // Se estiver na tela da chamada, renderiza o Host Tile na grade
           if (!this.watchPanel.classList.contains("hidden")) {
             this.renderHostTile();
           }
         } else {
-          this.btnCallShare.innerHTML = '<span class="btn-icon">📺</span> Transmitir Minha Tela';
-          this.btnCallShare.classList.remove("btn-secondary");
-          this.btnCallShare.classList.add("btn-primary");
+          this.btnCallShare.classList.remove("active-share");
+          this.btnCallShare.innerHTML = '<span class="call-icon">🖥️</span>';
+          this.btnCallShare.title = "Compartilhar sua tela";
           this.removeHostTile();
         }
         this.updateStatusPill();
         this.updateGridLayout();
       }
     );
+
+    // Atualiza contagem de espectadores e tráfego na miniatura do host na grade
+    this.shareManager.onViewersCountChange = (_count, text) => {
+      const hostViewersEl = document.getElementById("host-tile-viewers");
+      if (hostViewersEl) {
+        hostViewersEl.textContent = `👥 ${text}`;
+      }
+    };
 
     // Encaminha pacotes de pré-visualização para o host tile quando ativo na grade
     this.shareManager.onPreviewStreamEvent = (msg: StreamEvent) => {
@@ -250,6 +254,42 @@ class App {
         this.shareManager.openShareModal();
       }
     });
+
+    // Copiar Código da Sala no Dock da Chamada
+    const btnCallCopyTicket = document.getElementById("btn-call-copy-ticket") as HTMLButtonElement | null;
+    if (btnCallCopyTicket) {
+      btnCallCopyTicket.addEventListener("click", () => {
+        const ticket = this.shareManager.getRoomTicket();
+        if (ticket) {
+          navigator.clipboard.writeText(ticket);
+          const originalContent = btnCallCopyTicket.innerHTML;
+          btnCallCopyTicket.innerHTML = `<span class="call-icon">✅</span><span class="call-btn-label">Copiado!</span>`;
+          setTimeout(() => {
+            btnCallCopyTicket.innerHTML = originalContent;
+          }, 2000);
+        } else {
+          alert("Nenhum código de sala ativo no momento.\nInicie uma transmissão para gerar um código e convidar amigos!");
+        }
+      });
+    }
+
+    // Mutar/Desmutar Microfone / Áudio do Sistema na Chamada
+    const btnCallMuteMic = document.getElementById("btn-call-mute-mic") as HTMLButtonElement | null;
+    const callMicIcon = document.getElementById("call-mic-icon") as HTMLElement | null;
+    if (btnCallMuteMic) {
+      btnCallMuteMic.addEventListener("click", async () => {
+        const muted = await this.shareManager.toggleAudioMute();
+        if (callMicIcon) {
+          callMicIcon.textContent = muted ? "🔇" : "🎙️";
+        }
+        btnCallMuteMic.title = muted ? "Desmutar áudio do sistema" : "Mutar áudio do sistema";
+        if (muted) {
+          btnCallMuteMic.classList.add("btn-call-muted");
+        } else {
+          btnCallMuteMic.classList.remove("btn-call-muted");
+        }
+      });
+    }
 
     // Alternar Grade / Foco
     this.btnCallGridMode.addEventListener("click", () => {
@@ -340,25 +380,6 @@ class App {
     tile.dataset.streamId = streamId;
 
     tile.innerHTML = `
-      <div class="stream-tile-header">
-        <div class="tile-user-info">
-          <span class="status-dot red"></span>
-          <span class="tile-user-nick" title="${this.escapeHtml(displayHost)}">${this.escapeHtml(displayHost)}</span>
-          <span class="tile-addr-badge" title="${displayAddr}">${displayAddr}</span>
-        </div>
-        <div class="tile-stats-group">
-          <span class="badge-tile-stat res-tag">0x0</span>
-          <span class="badge-tile-stat fps-tag">60 FPS</span>
-          <span class="badge-tile-stat codec codec-tag">H.264</span>
-          <span class="badge-tile-stat rtt rtt-tag">RTT: -</span>
-        </div>
-        <div class="tile-actions">
-          <button class="btn-tile-action btn-tile-pip" title="Picture-in-Picture">📌</button>
-          <button class="btn-tile-action btn-tile-focus" title="Focar/Expandir este stream">⛶</button>
-          <button class="btn-tile-action btn-tile-close" title="Desconectar desta transmissão">✕</button>
-        </div>
-      </div>
-
       <div class="stream-tile-canvas-wrap">
         <canvas class="stream-tile-canvas"></canvas>
         <div class="player-overlay">
@@ -367,36 +388,48 @@ class App {
         </div>
       </div>
 
-      <div class="stream-tile-footer">
-        <div class="tile-volume-control">
-          <button class="btn-icon-xs btn-tile-mute" title="Mutar áudio deste amigo">🔊</button>
-          <input type="range" class="tile-volume-slider" min="0" max="1" step="0.05" value="1" />
-          <span class="volume-val-label">100%</span>
+      <div class="tile-top-overlay">
+        <span class="badge-discord-live">🔴 LIVE</span>
+        <span class="badge-tile-stat tile-stat-badge">Conectando...</span>
+      </div>
+
+      <div class="tile-user-pill">
+        <span class="tile-user-icon">🖥️</span>
+        <span class="tile-user-name" title="${this.escapeHtml(displayHost)}">${this.escapeHtml(displayHost)}</span>
+      </div>
+
+      <div class="tile-actions-overlay">
+        <div class="tile-volume-popover">
+          <button class="btn-tile-icon btn-tile-mute" title="Mutar áudio">🔊</button>
+          <input type="range" class="tile-volume-slider" min="0" max="1" step="0.05" value="1" title="Volume individual" />
         </div>
-        <div class="tile-loss-tag">Perda: 0%</div>
+        <button class="btn-tile-icon btn-tile-pip" title="Picture-in-Picture">📌</button>
+        <button class="btn-tile-icon btn-tile-focus" title="Focar/Expandir este stream">⛶</button>
+        <button class="btn-tile-icon btn-tile-close" title="Desconectar desta transmissão">✕</button>
       </div>
     `;
 
     const canvas = tile.querySelector("canvas") as HTMLCanvasElement;
     const overlay = tile.querySelector(".player-overlay") as HTMLElement;
-    const resTag = tile.querySelector(".res-tag") as HTMLElement;
-    const fpsTag = tile.querySelector(".fps-tag") as HTMLElement;
-    const codecTag = tile.querySelector(".codec-tag") as HTMLElement;
-    const rttTag = tile.querySelector(".rtt-tag") as HTMLElement;
-    const lossTag = tile.querySelector(".tile-loss-tag") as HTMLElement;
+    const statBadge = tile.querySelector(".tile-stat-badge") as HTMLElement;
     const volumeSlider = tile.querySelector(".tile-volume-slider") as HTMLInputElement;
     const btnMute = tile.querySelector(".btn-tile-mute") as HTMLButtonElement;
     const btnPip = tile.querySelector(".btn-tile-pip") as HTMLButtonElement;
     const btnFocus = tile.querySelector(".btn-tile-focus") as HTMLButtonElement;
     const btnClose = tile.querySelector(".btn-tile-close") as HTMLButtonElement;
 
+    let currentRes = "1080p";
+    let currentFps = "60 FPS";
+    let currentCodec = "H.264";
+
     // Inicializa o StreamPlayer dedicado para este tile
     const player = new StreamPlayer(
       canvas,
       overlay,
       (stats) => {
-        resTag.textContent = `${stats.width}x${stats.height}`;
-        fpsTag.textContent = `${stats.fps} FPS`;
+        currentRes = `${stats.width}x${stats.height}`;
+        currentFps = `${stats.fps} FPS`;
+        statBadge.textContent = `${currentRes} • ${currentFps}`;
       },
       true,
       () => {
@@ -417,26 +450,22 @@ class App {
         case "config":
           if (msg.width && msg.height) {
             player.setDimensions(msg.width, msg.height);
-            resTag.textContent = `${msg.width}x${msg.height}`;
+            currentRes = `${msg.width}x${msg.height}`;
           }
           if (msg.fps) {
-            fpsTag.textContent = `${msg.fps} FPS`;
+            currentFps = `${msg.fps} FPS`;
           }
           if (msg.codec) {
             player.configureDecoder(msg.codec);
-            codecTag.textContent = msg.codec.toUpperCase();
+            currentCodec = msg.codec.toUpperCase();
           }
+          statBadge.textContent = `${currentRes} • ${currentFps} • ${currentCodec}`;
           break;
         case "telemetry":
-          fpsTag.textContent = `${msg.fps} FPS`;
-          rttTag.textContent = `${msg.rtt_ms}ms`;
-          const fecInfo = msg.fec_recovered ? ` • FEC: ${msg.fec_recovered}` : "";
-          lossTag.textContent = `Perda: ${msg.loss_pct.toFixed(1)}%${fecInfo}`;
-          if (msg.loss_pct > 2.0 || msg.dropped_ref > 0) {
-            lossTag.classList.add("warning");
-          } else {
-            lossTag.classList.remove("warning");
-          }
+          currentFps = `${msg.fps} FPS`;
+          const fecInfo = msg.fec_recovered ? ` • FEC:${msg.fec_recovered}` : "";
+          const lossInfo = msg.loss_pct > 1 ? ` • ${msg.loss_pct.toFixed(1)}% perda` : "";
+          statBadge.textContent = `${currentRes} • ${currentFps} • ${msg.rtt_ms}ms${fecInfo}${lossInfo}`;
           break;
         case "ended":
           this.stopWatchingPeer(streamId);
@@ -449,8 +478,6 @@ class App {
       const vol = parseFloat(volumeSlider.value);
       player.setVolume(vol);
       btnMute.textContent = vol === 0 ? "🔇" : "🔊";
-      const lbl = tile.querySelector(".volume-val-label");
-      if (lbl) lbl.textContent = `${Math.round(vol * 100)}%`;
     });
 
     btnMute.addEventListener("click", () => {
@@ -489,11 +516,7 @@ class App {
       addr: displayAddr,
       player,
       element: tile,
-      resTag,
-      fpsTag,
-      codecTag,
-      rttTag,
-      lossTag,
+      statBadge,
       volumeSlider,
       btnMute,
     };
@@ -592,28 +615,25 @@ class App {
     tile.id = "host-stream-tile";
 
     tile.innerHTML = `
-      <div class="stream-tile-header">
-        <div class="tile-user-info">
-          <span class="status-dot red"></span>
-          <span class="tile-user-nick">Sua Transmissão (Você)</span>
-          <span class="badge-host-pill">Transmitindo</span>
-        </div>
-        <div class="tile-stats-group">
-          <span class="badge-tile-stat" id="host-tile-viewers">👥 Live Ativa</span>
-        </div>
-        <div class="tile-actions">
-          <button class="btn-tile-action btn-tile-focus" title="Focar seu stream">⛶</button>
-        </div>
-      </div>
-
       <div class="stream-tile-canvas-wrap">
         <canvas id="host-stream-tile-canvas" class="stream-tile-canvas"></canvas>
       </div>
 
-      <div class="stream-tile-footer host-footer">
-        <button class="btn-primary btn-xs" id="btn-host-tile-copy">📋 Copiar Código da Sala</button>
-        <button class="btn-secondary btn-xs" id="btn-host-tile-mute">🔇 Mutar Som</button>
-        <button class="btn-danger btn-xs" id="btn-host-tile-stop">⏹ Encerrar Transmissão</button>
+      <div class="tile-top-overlay">
+        <span class="badge-discord-live">🔴 LIVE</span>
+        <span class="badge-tile-stat" id="host-tile-viewers">👥 Live Ativa</span>
+      </div>
+
+      <div class="tile-user-pill">
+        <span class="tile-user-icon">🖥️</span>
+        <span class="tile-user-name">Sua Transmissão (Você)</span>
+      </div>
+
+      <div class="tile-actions-overlay visible-always">
+        <button class="btn-tile-action-pill" id="btn-host-tile-copy" title="Copiar código da sala P2P">📋 Copiar Código</button>
+        <button class="btn-tile-action-pill" id="btn-host-tile-mute" title="Mutar/Desmutar som da sua transmissão">🔇 Mutar Som</button>
+        <button class="btn-tile-action-pill danger" id="btn-host-tile-stop" title="Encerrar transmissão">⏹ Encerrar</button>
+        <button class="btn-tile-icon btn-tile-focus" title="Focar sua live">⛶</button>
       </div>
     `;
 

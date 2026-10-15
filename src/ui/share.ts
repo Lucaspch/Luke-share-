@@ -102,6 +102,7 @@ export class ShareManager {
   private currentRoomTicket: string | null = null;
   private modal?: ModalShareElements;
   public onPreviewStreamEvent?: (msg: StreamEvent) => void;
+  public onViewersCountChange?: (count: number, text: string) => void;
 
   private currentSources: SourceInfo[] = [];
   private activeTab: "monitors" | "windows" = "monitors";
@@ -513,6 +514,9 @@ export class ShareManager {
       this.previewFpsTag.textContent = `${info.fps} FPS`;
       this.previewResTag.textContent = `${info.width}x${info.height}`;
       this.previewViewersCount.textContent = "0 assistindo";
+      if (this.onViewersCountChange) {
+        this.onViewersCountChange(0, "0 assistindo");
+      }
       this.updateAudioTag();
 
       // Configura código da sala P2P (Iroh)
@@ -585,7 +589,11 @@ export class ShareManager {
           const count = stats.viewers_count;
           const mb = (stats.bytes_sent / (1024 * 1024)).toFixed(1);
           const nacks = stats.nacks_served > 0 ? ` • ${stats.nacks_served} NACKs atendidos` : "";
-          this.previewViewersCount.textContent = `${count} ${count === 1 ? "assistindo" : "assistindo"} • ${mb} MB${nacks}`;
+          const text = `${count} ${count === 1 ? "assistindo" : "assistindo"} • ${mb} MB${nacks}`;
+          this.previewViewersCount.textContent = text;
+          if (this.onViewersCountChange) {
+            this.onViewersCountChange(count, text);
+          }
         }
       } catch (e) {
         // Silencioso em caso de erro temporário

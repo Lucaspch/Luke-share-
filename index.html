@@ -17,7 +17,7 @@
               <circle cx="8" cy="10" r="1" fill="currentColor" />
             </svg>
             <span class="logo-text">Luke-Share</span>
-            <span class="version-tag">v0.3.3</span>
+            <span class="version-tag">v0.3.4</span>
             <button id="btn-check-updates" class="btn-check-update" title="Verificar se há atualizações">
               <span>🔄 Atualizações</span>
               <span id="update-badge" class="update-badge-dot hidden"></span>
@@ -224,31 +224,56 @@
 
           <!-- Modo 2: Visualizador / Sala de Chamada Multi-Stream (Estilo Discord Call) -->
           <div id="watch-panel" class="panel-section hidden">
-            <!-- Barra Superior da Sala -->
-            <div class="watch-header">
-              <div class="watch-info">
-                <span class="status-dot green"></span>
-                <span class="watch-title">Sala de Transmissão</span>
-                <span class="badge-count" id="streams-count-badge">0 transmissões</span>
+            <!-- Barra Superior Discord (Top Bar) -->
+            <div class="discord-call-top">
+              <div class="call-top-left">
+                <span class="call-speaker-icon">🔊</span>
+                <span class="call-room-title">Sala de Transmissão</span>
+                <span class="call-stream-count" id="streams-count-badge">0 transmissões</span>
               </div>
-              <div class="watch-actions">
-                <button id="btn-call-share" class="btn-primary btn-sm" title="Transmitir sua tela para os amigos nesta chamada">
-                  <span class="btn-icon">📺</span> Transmitir Minha Tela
-                </button>
-                <button id="btn-call-grid-mode" class="btn-secondary btn-sm" title="Alternar visualização em Grade ou Foco">🪟 Grade</button>
-                <button id="btn-mini-player" class="btn-secondary btn-sm" title="Modo Mini-Player Flutuante (Sempre no Topo)">🪟 Mini-Player</button>
-                <button id="btn-fullscreen" class="btn-secondary btn-sm" title="Tela Cheia">⛶ Tela Cheia</button>
-                <button id="btn-stop-all-watch" class="btn-danger btn-sm" title="Desconectar das transmissões assistidas">Sair da Chamada</button>
+              <div class="call-top-right">
+                <button id="btn-call-grid-mode" class="btn-call-icon-sm" title="Alternar Grade / Foco">⊞</button>
               </div>
             </div>
 
-            <!-- Grade Dinâmica de Transmissões -->
+            <!-- Grade Dinâmica de Transmissões (Área Central de Vídeo) -->
             <div class="streams-grid-wrapper" id="streams-grid-wrapper">
               <div class="streams-grid count-1" id="streams-grid">
                 <!-- Tiles dos amigos e o Host Tile entram aqui dinamicamente -->
               </div>
               <div class="mini-player-overlay" id="mini-player-overlay">
                 <button id="btn-exit-mini-player" class="btn-mini-restore" title="Restaurar janela completa">⤢ Restaurar Janela</button>
+              </div>
+            </div>
+
+            <!-- Barra Inferior Flutuante Discord (Bottom Call Dock) -->
+            <div class="discord-call-bar">
+              <div class="call-bar-left">
+                <button id="btn-call-copy-ticket" class="btn-call-icon" title="Copiar Código da Sala para convidar amigos">
+                  <span class="call-icon">🎟️</span>
+                  <span class="call-btn-label">Código da Sala</span>
+                </button>
+              </div>
+
+              <div class="call-bar-center">
+                <button id="btn-call-share" class="btn-call-circle" title="Compartilhar sua tela (ou abrir opções)">
+                  <span class="call-icon">🖥️</span>
+                </button>
+                <button id="btn-call-mute-mic" class="btn-call-circle" title="Mutar/Desmutar áudio do sistema">
+                  <span class="call-icon" id="call-mic-icon">🎙️</span>
+                </button>
+                <button id="btn-stop-all-watch" class="btn-call-circle btn-call-disconnect" title="Sair da Chamada (Desconectar)">
+                  <span class="call-icon">📞</span>
+                </button>
+              </div>
+
+              <div class="call-bar-right">
+                <button id="btn-mini-player" class="btn-call-icon" title="Modo Mini-Player Flutuante (Sempre no Topo)">
+                  <span class="call-icon">🪟</span>
+                </button>
+                <button id="btn-fullscreen" class="btn-call-icon" title="Tela Cheia">
+                  <span class="call-icon">⛶</span>
+                </button>
               </div>
             </div>
           </div>
