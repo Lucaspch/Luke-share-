@@ -37,12 +37,12 @@ if ($Version -ne "" -and $Version -ne $currentVer) {
     
     # Atualiza Cargo.toml
     $cargoContent = [System.IO.File]::ReadAllText($cargoPath, [System.Text.Encoding]::UTF8)
-    $cargoContent = $cargoContent -replace 'version = "' + [regex]::Escape($currentVer) + '"', ('version = "' + $Version + '"')
+    $cargoContent = [regex]::Replace($cargoContent, '(?m)(^version\s*=\s*")[^"]+(")', ('${1}' + $Version + '${2}'))
     [System.IO.File]::WriteAllText($cargoPath, $cargoContent, $utf8NoBom)
     
     # Atualiza index.html tag
     $htmlContent = [System.IO.File]::ReadAllText($htmlPath, [System.Text.Encoding]::UTF8)
-    $htmlContent = $htmlContent -replace 'v' + [regex]::Escape($currentVer), ('v' + $Version)
+    $htmlContent = [regex]::Replace($htmlContent, '(?<=class="version-tag">v)[0-9\.]+', $Version)
     [System.IO.File]::WriteAllText($htmlPath, $htmlContent, $utf8NoBom)
     
     $currentVer = $Version

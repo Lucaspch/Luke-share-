@@ -21,6 +21,36 @@ use crate::pipeline::{base64_encode, StreamEvent};
 
 pub type StreamEventSink = Arc<dyn Fn(StreamEvent) + Send + Sync>;
 
+/// Deduplicador de pacotes de áudio baseado no frame_id sequencial.
+/// Garante que mesmo com múltiplos caminhos de rede (Mesh Relay, retransmissões UDP ou duplicatas)
+/// cada pacote de áudio PCM só seja decodificado e reproduzido exatamente uma vez.
+pub struct AudioDeduplicator {
+    seen: [u32; 256],
+    idx: usize,
+}
+
+impl AudioDeduplicator {
+    pub fn new() -> Self {
+        Self {
+            seen: [0; 256],
+            idx: 0,
+        }
+    }
+
+    /// Retorna `true` se o `fid` já foi processado recentemente (ou seja, é duplicata).
+    pub fn is_duplicate(&mut self, fid: u32) -> bool {
+        if fid == 0 {
+            return false;
+        }
+        if self.seen.contains(&fid) {
+            return true;
+        }
+        self.seen[self.idx] = fid;
+        self.idx = (self.idx + 1) % self.seen.len();
+        false
+    }
+}
+
 pub struct ReceiverPipeline {
     stop: Arc<AtomicBool>,
     client: Arc<parking_lot::Mutex<Option<ViewerClient>>>,
@@ -152,6 +182,7 @@ impl ReceiverPipeline {
             .name("receiver-udp-rx".into())
             .spawn(move || {
                 let mut reassembler = Reassembler::new();
+                let mut audio_dedup = AudioDeduplicator::new();
                 let mut opus_dec = match OpusDec::new() {
                     Ok(d) => Some(d),
                     Err(e) => {
@@ -199,12 +230,14 @@ impl ReceiverPipeline {
                                                 }
                                             }
                                             KIND_AUDIO => {
-                                                if let Some(dec) = &mut opus_dec {
-                                                    if let Ok(pcm) = dec.decode(payload) {
-                                                        let bytes: &[u8] = unsafe {
-                                                            std::slice::from_raw_parts(pcm.as_ptr() as *const u8, pcm.len() * 4)
-                                                        };
-                                                        let _ = audio_tx.try_send(bytes.to_vec());
+                                                if !audio_dedup.is_duplicate(h.frame_id) {
+                                                    if let Some(dec) = &mut opus_dec {
+                                                        if let Ok(pcm) = dec.decode(payload) {
+                                                            let bytes: &[u8] = unsafe {
+                                                                std::slice::from_raw_parts(pcm.as_ptr() as *const u8, pcm.len() * 4)
+                                                            };
+                                                            let _ = audio_tx.try_send(bytes.to_vec());
+                                                        }
                                                     }
                                                 }
                                             }
@@ -488,6 +521,7 @@ impl ReceiverPipeline {
         let mesh_dg_tx_mesh = mesh_dg_tx.clone();
         let p2p_task = tokio::spawn(async move {
             let mut reassembler = Reassembler::new();
+            let mut audio_dedup = AudioDeduplicator::new();
             let mut opus_dec = match OpusDec::new() {
                 Ok(d) => Some(d),
                 Err(e) => {
@@ -529,25 +563,25 @@ impl ReceiverPipeline {
                                                     }
                                                 }
                                             }
-                                            // Relé Mesh Assistido: retransmite aos peers mesh conectados
+                                            // Relé Mesh Assistido: retransmite vídeo aos peers mesh conectados
                                             let peers = mesh_peers_fwd.lock().clone();
                                             for p in peers {
                                                 let _ = p.send_datagram(dg.clone());
                                             }
                                         }
                                         KIND_AUDIO => {
-                                            if let Some(dec) = &mut opus_dec {
-                                                if let Ok(pcm) = dec.decode(payload) {
-                                                    let bytes: &[u8] = unsafe {
-                                                        std::slice::from_raw_parts(pcm.as_ptr() as *const u8, pcm.len() * 4)
-                                                    };
-                                                    let _ = audio_tx.try_send(bytes.to_vec());
+                                            if !audio_dedup.is_duplicate(h.frame_id) {
+                                                if let Some(dec) = &mut opus_dec {
+                                                    if let Ok(pcm) = dec.decode(payload) {
+                                                        let bytes: &[u8] = unsafe {
+                                                            std::slice::from_raw_parts(pcm.as_ptr() as *const u8, pcm.len() * 4)
+                                                        };
+                                                        let _ = audio_tx.try_send(bytes.to_vec());
+                                                    }
                                                 }
                                             }
-                                            let peers = mesh_peers_fwd.lock().clone();
-                                            for p in peers {
-                                                let _ = p.send_datagram(dg.clone());
-                                            }
+                                            // NÃO retransmite áudio para peers mesh. O anfitrião já envia
+                                            // diretamente para todos os espectadores.
                                         }
                                         KIND_RELAY_ANNOUNCE => {
                                             if let Ok(ticket_str) = std::str::from_utf8(payload) {
@@ -601,12 +635,14 @@ impl ReceiverPipeline {
                                     }
                                 }
                                 KIND_AUDIO => {
-                                    if let Some(dec) = &mut opus_dec {
-                                        if let Ok(pcm) = dec.decode(payload) {
-                                            let bytes: &[u8] = unsafe {
-                                                std::slice::from_raw_parts(pcm.as_ptr() as *const u8, pcm.len() * 4)
-                                            };
-                                            let _ = audio_tx.try_send(bytes.to_vec());
+                                    if !audio_dedup.is_duplicate(h.frame_id) {
+                                        if let Some(dec) = &mut opus_dec {
+                                            if let Ok(pcm) = dec.decode(payload) {
+                                                let bytes: &[u8] = unsafe {
+                                                    std::slice::from_raw_parts(pcm.as_ptr() as *const u8, pcm.len() * 4)
+                                                };
+                                                let _ = audio_tx.try_send(bytes.to_vec());
+                                            }
                                         }
                                     }
                                 }
@@ -808,5 +844,23 @@ mod tests {
         receiver.stop().await;
         stop.store(true, Ordering::SeqCst);
         Ok(())
+    }
+
+    #[test]
+    fn test_audio_deduplicator() {
+        let mut dedup = AudioDeduplicator::new();
+        assert!(!dedup.is_duplicate(1));
+        assert!(dedup.is_duplicate(1)); // duplicata imediata descartada
+        assert!(!dedup.is_duplicate(2));
+        assert!(dedup.is_duplicate(2));
+        assert!(dedup.is_duplicate(1)); // ainda dentro do histórico
+
+        // Preenche com 256 frames novos
+        for fid in 100..356 {
+            assert!(!dedup.is_duplicate(fid));
+        }
+        // Agora o 1 foi reciclado pelo ring buffer
+        assert!(!dedup.is_duplicate(1));
+        assert!(dedup.is_duplicate(1));
     }
 }
