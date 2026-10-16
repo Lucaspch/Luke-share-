@@ -4,335 +4,446 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Luke-Share</title>
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <!-- Google Fonts: Plus Jakarta Sans & Material Symbols Rounded -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
     <div id="app">
-      <!-- Cabeçalho Principal -->
+      <!-- 1. Cabeçalho Superior (Estilo Sketch: Logo Luke à esquerda, Versão/Update, Apelido e Status à direita) -->
       <header class="app-header">
         <div class="header-left">
-          <div class="logo">
-            <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M4 14h6m-6 4h10M4 6h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z" />
-              <circle cx="8" cy="10" r="1" fill="currentColor" />
-            </svg>
-            <span class="logo-text">Luke-Share</span>
-            <span class="version-tag">v0.3.5</span>
-            <button id="btn-check-updates" class="btn-check-update" title="Verificar se há atualizações">
-              <span>🔄 Atualizações</span>
+          <a href="#" class="brand-logo" id="btn-home-logo" title="Luke-Share — Início">
+            <img src="/logo.svg" alt="Luke" class="luke-logo-svg" />
+          </a>
+
+          <div class="header-version-cluster">
+            <span class="version-tag">v0.3.6</span>
+            <button id="btn-check-updates" class="btn-check-update" title="Verificar atualizações">
+              <span class="material-symbols-rounded ms-sm">sync</span>
+              <span>Atualizações</span>
               <span id="update-badge" class="update-badge-dot hidden"></span>
             </button>
           </div>
-        </div>
 
-        <div class="header-center">
-          <div class="network-badge" id="network-badge">
+          <div class="network-badge" id="network-badge" title="Status da Rede P2P">
             <span class="status-dot green"></span>
-            <span class="network-label">Rede:</span>
-            <span class="network-ip" id="my-ip">P2P Nativo Iroh Pronto</span>
+            <span class="network-ip" id="my-ip">P2P Nativo Pronto</span>
           </div>
         </div>
 
         <div class="header-right">
-          <div class="nick-container">
-            <label for="nick-input">Apelido:</label>
-            <input type="text" id="nick-input" maxlength="24" placeholder="Seu nome" />
-            <button id="btn-save-nick" class="btn-icon" title="Salvar apelido">💾</button>
+          <div class="user-profile-cluster">
+            <div class="nick-container">
+              <label for="nick-input">Apelido:</label>
+              <input type="text" id="nick-input" maxlength="24" placeholder="Seu apelido" />
+              <button id="btn-save-nick" class="btn-icon-ghost" title="Salvar apelido">
+                <span class="material-symbols-rounded ms-sm">save</span>
+              </button>
+            </div>
+            <div class="status-pill" id="my-status">
+              <span class="status-pill-dot"></span>
+              <span id="my-status-text">Ocioso</span>
+            </div>
           </div>
-          <div class="status-pill" id="my-status">Ocioso</div>
         </div>
       </header>
 
-      <!-- Corpo Principal -->
-      <main class="app-main">
-        <!-- Barra Lateral: Descoberta de Peers & Conexão Direta -->
-        <aside class="sidebar">
-          <div class="sidebar-header">
-            <h3>Conectar & Peers</h3>
-            <span class="badge-count" id="peers-count">0</span>
+      <!-- 2. Barra Central de Conexão Rápida / Omnibar (Barra Azul Estilo Sketch) -->
+      <section class="omnibar-section">
+        <div class="omnibar-wrapper">
+          <div class="omnibar-pill">
+            <span class="material-symbols-rounded omnibar-lead-icon">cast_connected</span>
+            <input
+              type="text"
+              id="manual-ip-input"
+              placeholder="Cole o código da sala (lk-...) ou IP de um amigo para assistir..."
+              autocomplete="off"
+              spellcheck="false"
+            />
+
+            <!-- Botão de Peers Locais Descobertos -->
+            <button
+              id="btn-peers-toggle"
+              class="btn-omnibar-peers"
+              type="button"
+              title="Ver amigos na rede local e salas ativas"
+            >
+              <span class="material-symbols-rounded ms-sm">radar</span>
+              <span class="peers-label-text">Peers</span>
+              <span class="badge-count" id="peers-count">0</span>
+            </button>
+
+            <button id="btn-add-manual" class="btn-omnibar-enter" title="Conectar à transmissão">
+              <span>Entrar</span>
+            </button>
           </div>
 
-          <div class="manual-connect">
-            <input type="text" id="manual-ip-input" placeholder="Código da Sala (lk-...) ou IP" />
-            <button id="btn-add-manual" class="btn-primary btn-sm" title="Conectar">Entrar</button>
-          </div>
+          <!-- Pílula Rápida do Código da Sua Sala (Visível quando você está transmitindo) -->
+          <button
+            id="top-ticket-pill"
+            class="top-ticket-pill hidden"
+            title="Clique para copiar o Código da sua Sala P2P e enviar aos amigos"
+          >
+            <span class="material-symbols-rounded ms-sm">vpn_key</span>
+            <span class="ticket-pill-label">Código da Sala</span>
+            <span class="material-symbols-rounded ms-xs">content_copy</span>
+          </button>
 
-          <div class="peers-list" id="peers-list">
-            <div class="empty-peers">Buscando peers locais... Cole um Código de Sala acima para assistir via Internet!</div>
-          </div>
-        </aside>
+          <!-- Chips Rápidos de Amigos Transmitindo Agora -->
+          <div id="live-peers-strip" class="live-peers-strip"></div>
 
-        <!-- Área Central de Conteúdo -->
-        <section class="content-area">
-          <!-- Modo 1: Painel de Compartilhamento -->
-          <div id="share-panel" class="panel-section active">
-            <div class="panel-title-bar">
-              <h2>Compartilhar Tela</h2>
-              <button id="btn-refresh-sources" class="btn-secondary btn-sm">🔄 Atualizar Fontes</button>
+          <!-- Popover Flutuante de Peers Descobertos -->
+          <div id="peers-popover" class="peers-popover hidden">
+            <div class="peers-popover-header">
+              <div class="popover-title-group">
+                <span class="material-symbols-rounded ms-sm">group</span>
+                <h4>Amigos & Peers na Rede</h4>
+              </div>
+              <button id="btn-close-peers-popover" class="btn-icon-ghost" title="Fechar">
+                <span class="material-symbols-rounded ms-sm">close</span>
+              </button>
             </div>
-
-            <!-- Pré-visualização da Live do Anfitrião (Visível durante a transmissão) -->
-            <div id="host-preview-card" class="host-preview-card hidden">
-              <div class="preview-header">
-                <div class="preview-title-box">
-                  <span class="status-dot red"></span>
-                  <span class="preview-title">Sua Transmissão ao Vivo (Prévia)</span>
-                  <span class="badge-low-latency" id="preview-fps-tag">60 FPS</span>
-                  <span class="badge-count" id="preview-res-tag">1920x1080</span>
-                </div>
-                <div class="preview-viewers-box">
-                  <span class="viewers-icon">👥</span>
-                  <span id="preview-viewers-count">0 assistindo</span>
-                </div>
+            <div class="peers-list" id="peers-list">
+              <div class="empty-peers">
+                Buscando peers locais... Cole um Código de Sala (lk-...) na barra acima para conectar via Internet!
               </div>
+            </div>
+          </div>
+        </div>
+      </section>
 
-              <div class="preview-canvas-wrapper" id="preview-canvas-wrapper">
-                <canvas id="host-preview-canvas"></canvas>
-                <div id="host-preview-overlay" class="player-overlay">
-                  <div class="spinner"></div>
-                  <div class="overlay-text">Iniciando prévia da transmissão...</div>
-                </div>
-              </div>
+      <!-- 3. Palco Central (Stage Principal — Estúdio de Configuração ou Grade 1 / 2 / 4 Streams) -->
+      <main class="app-stage">
+        <!-- Modo A: Estúdio de Preparação de Transmissão (Exibido quando ocioso) -->
+        <div id="share-panel" class="stage-card studio-stage active">
+          <!-- Cartão legado de prévia oculto (mantido por compatibilidade de referências) -->
+          <div id="host-preview-card" class="host-preview-card hidden">
+            <span id="preview-fps-tag">60 FPS</span>
+            <span id="preview-res-tag">1920x1080</span>
+            <span id="preview-viewers-count">0 assistindo</span>
+            <canvas id="host-preview-canvas"></canvas>
+            <div id="host-preview-overlay"></div>
+            <strong id="stat-port">-</strong>
+            <span id="stat-audio-tag"></span>
+            <button id="btn-toggle-audio-mute"></button>
+            <button id="btn-stop-share-top"></button>
+            <div id="room-ticket-box" class="hidden">
+              <input type="text" id="share-ticket-input" readonly />
+              <button id="btn-copy-ticket"></button>
+            </div>
+          </div>
 
-              <div class="preview-controls-bar">
-                <div class="preview-stats-left">
-                  <span>Porta UDP: <strong id="stat-port">-</strong></span>
-                  <span class="audio-status-tag" id="stat-audio-tag">🔊 Áudio ativo (Discord isolado)</span>
-                </div>
-                <div class="preview-actions-right">
-                  <button id="btn-toggle-audio-mute" class="btn-secondary btn-sm">🔇 Mutar Áudio</button>
-                  <button id="btn-stop-share-top" class="btn-danger btn-sm">⏹ Encerrar Transmissão</button>
-                </div>
-              </div>
-
-              <!-- Cartão do Ticket P2P da Sala -->
-              <div id="room-ticket-box" class="room-ticket-card hidden">
-                <div class="ticket-header-line">
-                  <div class="ticket-title-group">
-                    <span class="ticket-icon">🎟️</span>
-                    <span class="ticket-title">Código da Sala (Conexão P2P Direta):</span>
-                    <span class="ticket-badge">P2P Seguro • Internet Direta</span>
+          <div id="sources-selection-area" class="studio-layout">
+            <!-- Coluna Esquerda: Seleção de Monitores e Aplicativos -->
+            <div class="studio-left-column">
+              <div class="studio-header">
+                <div class="studio-title-group">
+                  <img src="/icon.svg" alt="" class="studio-emblem" />
+                  <div>
+                    <h2>Escolha o que deseja transmitir</h2>
+                    <p class="studio-subtitle">
+                      Selecione um monitor ou aplicativo abaixo, ou cole o código de um amigo acima para assistir
+                    </p>
                   </div>
-                  <button id="btn-copy-ticket" class="btn-primary btn-sm">📋 Copiar Código</button>
                 </div>
-                <div class="ticket-input-wrapper">
-                  <input type="text" id="share-ticket-input" readonly value="Gerando código da sala..." />
+
+                <div class="studio-header-actions">
+                  <div class="source-type-tabs">
+                    <button class="tab-btn active" data-tab="monitors">
+                      <span class="material-symbols-rounded ms-sm">desktop_windows</span>
+                      <span>Monitores</span>
+                    </button>
+                    <button class="tab-btn" data-tab="windows">
+                      <span class="material-symbols-rounded ms-sm">window</span>
+                      <span>Aplicativos</span>
+                    </button>
+                  </div>
+                  <button id="btn-refresh-sources" class="btn-secondary btn-sm" title="Atualizar lista de telas e janelas">
+                    <span class="material-symbols-rounded ms-sm">refresh</span>
+                    <span>Atualizar</span>
+                  </button>
                 </div>
-                <div class="ticket-hint">
-                  ✨ Conexão P2P direta via Internet. Basta enviar este código para seus amigos colarem na barra lateral e assistirem imediatamente!
+              </div>
+
+              <!-- Grade de Fontes Disponíveis -->
+              <div class="sources-grid" id="sources-grid">
+                <div class="loading-sources">Carregando telas e janelas disponíveis...</div>
+              </div>
+
+              <!-- Barra de Parâmetros de Codificação -->
+              <div class="share-controls-card">
+                <div class="control-row">
+                  <div class="control-group">
+                    <label for="codec-select">
+                      <span class="material-symbols-rounded ms-xs">memory</span>
+                      Codec de Vídeo
+                    </label>
+                    <select id="codec-select">
+                      <option value="auto" selected>Auto (H.264 Ultra-Baixa Latência)</option>
+                      <option value="h264">H.264 / AVC (Universal)</option>
+                      <option value="hevc">HEVC / H.265 (Alta Fidelidade)</option>
+                      <option value="av1">AV1 (Máxima Eficiência)</option>
+                    </select>
+                  </div>
+
+                  <div class="control-group">
+                    <label for="resolution-select">
+                      <span class="material-symbols-rounded ms-xs">aspect_ratio</span>
+                      Resolução
+                    </label>
+                    <select id="resolution-select">
+                      <option value="1080" selected>1080p (1920x1080) — Recomendado</option>
+                      <option value="720">720p (1280x720) — Rápido</option>
+                      <option value="480">480p (854x480) — Leve</option>
+                      <option value="source">Nativa (Resolução original)</option>
+                    </select>
+                  </div>
+
+                  <div class="control-group">
+                    <label for="fps-select">
+                      <span class="material-symbols-rounded ms-xs">speed</span>
+                      Quadros (FPS)
+                    </label>
+                    <select id="fps-select">
+                      <option value="auto" selected>Taxa do Monitor (Detectada)</option>
+                      <option value="60">60 FPS (Padrão)</option>
+                      <option value="120">120 FPS</option>
+                      <option value="144">144 FPS</option>
+                      <option value="240">240 FPS (Competitivo)</option>
+                      <option value="unlocked">Destravado (Sem limite)</option>
+                    </select>
+                  </div>
+
+                  <div class="control-group">
+                    <label for="bitrate-select">
+                      <span class="material-symbols-rounded ms-xs">network_check</span>
+                      Bitrate
+                    </label>
+                    <select id="bitrate-select">
+                      <option value="auto" selected>Auto (Adaptativo Inteligente)</option>
+                      <option value="20000">Ultra Gaming (20 Mbps)</option>
+                      <option value="14000">Alta Qualidade (14 Mbps)</option>
+                      <option value="8000">Equilibrado (8 Mbps)</option>
+                      <option value="4000">Econômico (4 Mbps)</option>
+                    </select>
+                  </div>
                 </div>
               </div>
             </div>
 
-            <!-- Área de Seleção de Fontes e Configurações (Quando não estiver transmitindo) -->
-            <div id="sources-selection-area">
-              <div class="source-type-tabs">
-                <button class="tab-btn active" data-tab="monitors">🖥️ Monitores</button>
-                <button class="tab-btn" data-tab="windows">🪟 Aplicativos</button>
-              </div>
-
-              <!-- Lista de Fontes (Monitores ou Janelas) -->
-              <div class="sources-grid" id="sources-grid">
-                <div class="loading-sources">Carregando telas e janelas...</div>
-              </div>
-
-              <!-- Pré-visualização Instantânea da Fonte Selecionada -->
+            <!-- Coluna Direita: Prévia Instantânea & Ação de Início -->
+            <div class="studio-right-column">
               <div class="source-preview-card" id="source-preview-card">
                 <div class="source-preview-header">
                   <div class="preview-header-left">
                     <span class="preview-dot"></span>
-                    <span class="preview-title">Prévia da Captura (Antes de Iniciar)</span>
+                    <span class="preview-title">Prévia da Fonte Selecionada</span>
                   </div>
-                  <button id="btn-refresh-preview" class="btn-secondary btn-sm" title="Capturar nova miniatura">🔄 Atualizar Prévia</button>
+                  <button id="btn-refresh-preview" class="btn-icon-ghost" title="Atualizar miniatura">
+                    <span class="material-symbols-rounded ms-sm">refresh</span>
+                  </button>
                 </div>
+
                 <div class="source-preview-body">
-                  <img id="source-preview-img" class="source-preview-img hidden" alt="Miniatura da tela/janela" />
+                  <img id="source-preview-img" class="source-preview-img hidden" alt="Miniatura da fonte" />
                   <div id="source-preview-placeholder" class="source-preview-placeholder">
-                    <span>🖥️ Selecione um monitor ou janela acima para visualizar a prévia instantânea</span>
+                    <span class="material-symbols-rounded preview-placeholder-icon">desktop_windows</span>
+                    <span>Selecione um monitor ou janela ao lado para visualizar</span>
                   </div>
                 </div>
-              </div>
 
-              <!-- Controles de Configuração -->
-              <div class="share-controls-card">
-                <div class="control-row">
-                  <div class="control-group">
-                    <label for="codec-select">Codec de Vídeo:</label>
-                    <select id="codec-select">
-                      <option value="auto" selected>✨ Auto (H.264 Ultra-Compatível • Baixa Latência)</option>
-                      <option value="h264">🛡️ H.264 / AVC (Universal • Baixa Latência)</option>
-                      <option value="hevc">🚀 HEVC / H.265 (Alta Fidelidade)</option>
-                      <option value="av1">💎 AV1 (Máxima Eficiência • Menos Bitrate)</option>
-                    </select>
-                  </div>
-
-                  <div class="control-group">
-                    <label for="resolution-select">Qualidade / Resolução:</label>
-                    <select id="resolution-select">
-                      <option value="1080" selected>1080p (1920x1080) — Recomendado</option>
-                      <option value="720">720p (1280x720) — Rápido</option>
-                      <option value="480">480p (854x480) — Baixo Consumo</option>
-                      <option value="source">Origem (Nativa exata)</option>
-                    </select>
-                  </div>
-
-                  <div class="control-group">
-                    <label for="fps-select">Taxa de Quadros (FPS):</label>
-                    <select id="fps-select">
-                      <option value="auto" selected>✨ Taxa do Monitor (Detectada)</option>
-                      <option value="60">60 FPS (Padrão)</option>
-                      <option value="120">120 FPS</option>
-                      <option value="144">144 FPS</option>
-                      <option value="240">240 FPS (Alta performance)</option>
-                      <option value="unlocked">🚀 Destravado (Sem limite)</option>
-                    </select>
-                  </div>
-
-                  <div class="control-group">
-                    <label for="bitrate-select">Taxa de Bits (Bitrate):</label>
-                    <select id="bitrate-select">
-                      <option value="auto" selected>⚡ Auto (Recomendado para Jogos)</option>
-                      <option value="20000">🚀 Ultra Gaming (20 Mbps)</option>
-                      <option value="14000">✨ Alta Qualidade (14 Mbps)</option>
-                      <option value="8000">⚖️ Equilibrado (8 Mbps)</option>
-                      <option value="4000">📉 Econômico (4 Mbps)</option>
-                    </select>
-                  </div>
-
-                  <div class="control-group">
-                    <label class="checkbox-label">
-                      <input type="checkbox" id="audio-enable-checkbox" checked />
-                      <span>Transmitir Áudio do Sistema</span>
-                    </label>
-                    <div class="discord-badge">
-                      <span>🛡️ Discord.exe isolado automaticamente (sem eco)</span>
-                    </div>
+                <div class="studio-audio-box">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="audio-enable-checkbox" checked />
+                    <span class="material-symbols-rounded ms-sm">volume_up</span>
+                    <span>Transmitir Áudio do Sistema</span>
+                  </label>
+                  <div class="discord-badge">
+                    <span class="material-symbols-rounded ms-xs">verified_user</span>
+                    <span>Discord.exe isolado automaticamente (Zero Eco)</span>
                   </div>
                 </div>
 
                 <div class="share-actions">
-                  <button id="btn-start-share" class="btn-primary btn-large">
-                    <span class="btn-icon">▶</span> Iniciar Transmissão
+                  <button id="btn-start-share" class="btn-primary btn-large btn-full">
+                    <span class="material-symbols-rounded">screen_share</span>
+                    <span>Iniciar Transmissão</span>
                   </button>
-                  <button id="btn-stop-share" class="btn-danger btn-large hidden">
-                    <span class="btn-icon">⏹</span> Encerrar Transmissão
+                  <button id="btn-stop-share" class="btn-danger btn-large btn-full hidden">
+                    <span class="material-symbols-rounded">stop_circle</span>
+                    <span>Encerrar Transmissão</span>
                   </button>
                 </div>
               </div>
             </div>
           </div>
+        </div>
 
-          <!-- Modo 2: Visualizador / Sala de Chamada Multi-Stream (Estilo Discord Call) -->
-          <div id="watch-panel" class="panel-section hidden">
-            <!-- Barra Superior Discord (Top Bar) -->
-            <div class="discord-call-top">
-              <div class="call-top-left">
-                <span class="call-speaker-icon">🔊</span>
-                <span class="call-room-title">Sala de Transmissão</span>
-                <span class="call-stream-count" id="streams-count-badge">0 transmissões</span>
-              </div>
-              <div class="call-top-right">
-                <button id="btn-call-grid-mode" class="btn-call-icon-sm" title="Alternar Grade / Foco">⊞</button>
-              </div>
+        <!-- Modo B: Palco de Transmissão Multi-Stream (1 Stream Grande ou Grade 2x2 de 4 Streams) -->
+        <div id="watch-panel" class="stage-watch-container hidden">
+          <div class="streams-grid-wrapper" id="streams-grid-wrapper">
+            <div class="streams-grid count-1" id="streams-grid">
+              <!-- Tiles das transmissões ativas entram aqui dinamicamente -->
             </div>
 
-            <!-- Grade Dinâmica de Transmissões (Área Central de Vídeo) -->
-            <div class="streams-grid-wrapper" id="streams-grid-wrapper">
-              <div class="streams-grid count-1" id="streams-grid">
-                <!-- Tiles dos amigos e o Host Tile entram aqui dinamicamente -->
-              </div>
-              <div class="mini-player-overlay" id="mini-player-overlay">
-                <button id="btn-exit-mini-player" class="btn-mini-restore" title="Restaurar janela completa">⤢ Restaurar Janela</button>
-              </div>
-            </div>
-
-            <!-- Barra Inferior Flutuante Discord (Bottom Call Dock) -->
-            <div class="discord-call-bar">
-              <div class="call-bar-left">
-                <button id="btn-call-copy-ticket" class="btn-call-icon" title="Copiar Código da Sala para convidar amigos">
-                  <span class="call-icon">🎟️</span>
-                  <span class="call-btn-label">Código da Sala</span>
-                </button>
-              </div>
-
-              <div class="call-bar-center">
-                <button id="btn-call-share" class="btn-call-circle" title="Compartilhar sua tela (ou abrir opções)">
-                  <span class="call-icon">🖥️</span>
-                </button>
-                <button id="btn-call-mute-mic" class="btn-call-circle" title="Mutar/Desmutar áudio do sistema">
-                  <span class="call-icon" id="call-mic-icon">🎙️</span>
-                </button>
-                <button id="btn-stop-all-watch" class="btn-call-circle btn-call-disconnect" title="Sair da Chamada (Desconectar)">
-                  <span class="call-icon">📞</span>
-                </button>
-              </div>
-
-              <div class="call-bar-right">
-                <button id="btn-mini-player" class="btn-call-icon" title="Modo Mini-Player Flutuante (Sempre no Topo)">
-                  <span class="call-icon">🪟</span>
-                </button>
-                <button id="btn-fullscreen" class="btn-call-icon" title="Tela Cheia">
-                  <span class="call-icon">⛶</span>
-                </button>
-              </div>
+            <div class="mini-player-overlay" id="mini-player-overlay">
+              <button id="btn-exit-mini-player" class="btn-mini-restore" title="Restaurar janela completa">
+                <span class="material-symbols-rounded ms-sm">open_in_full</span>
+                <span>Restaurar Janela</span>
+              </button>
             </div>
           </div>
-        </section>
+        </div>
       </main>
 
-      <!-- Modal para Iniciar Transmissão durante a Chamada (Estilo Discord) -->
+      <!-- 4. Dock Inferior com os 3 Círculos Principais (Design Fiel ao Rascunho) -->
+      <footer class="bottom-dock-bar">
+        <div class="dock-side dock-left">
+          <div class="call-room-chip" id="call-room-chip" title="Status da Sala">
+            <span class="material-symbols-rounded ms-sm">graphic_eq</span>
+            <span id="streams-count-badge">Estúdio Pronto</span>
+          </div>
+
+          <button
+            id="btn-call-copy-ticket"
+            class="btn-dock-pill"
+            title="Copiar Código da Sala P2P para convidar amigos"
+          >
+            <span class="material-symbols-rounded ms-sm">content_copy</span>
+            <span>Copiar Código</span>
+          </button>
+        </div>
+
+        <!-- Os 3 Botões Circulares Brancos Centrais do Rascunho -->
+        <div class="dock-center-circles">
+          <button
+            id="btn-call-share"
+            class="btn-dock-circle"
+            title="Compartilhar Tela / Alternar Fonte de Transmissão"
+          >
+            <span class="material-symbols-rounded">screen_share</span>
+          </button>
+
+          <button
+            id="btn-call-mute-mic"
+            class="btn-dock-circle"
+            title="Mutar / Desmutar Áudio da Transmissão"
+          >
+            <span class="material-symbols-rounded" id="call-mic-icon">volume_up</span>
+          </button>
+
+          <button
+            id="btn-stop-all-watch"
+            class="btn-dock-circle btn-dock-hangup"
+            title="Encerrar e Sair da Sala"
+          >
+            <span class="material-symbols-rounded">call_end</span>
+          </button>
+        </div>
+
+        <div class="dock-side dock-right">
+          <button
+            id="btn-call-grid-mode"
+            class="btn-dock-pill"
+            title="Alternar Modo Grade / Foco (Duplo clique no vídeo também expande)"
+          >
+            <span class="material-symbols-rounded ms-sm">grid_view</span>
+            <span id="grid-mode-label">Grade</span>
+          </button>
+
+          <button
+            id="btn-mini-player"
+            class="btn-dock-icon"
+            title="Modo Mini-Player Flutuante (Sempre no Topo)"
+          >
+            <span class="material-symbols-rounded ms-sm">picture_in_picture_alt</span>
+          </button>
+
+          <button id="btn-fullscreen" class="btn-dock-icon" title="Tela Cheia">
+            <span class="material-symbols-rounded ms-sm">fullscreen</span>
+          </button>
+        </div>
+      </footer>
+
+      <!-- Modal para Iniciar ou Trocar Transmissão durante a Chamada -->
       <div id="share-modal" class="modal-backdrop hidden">
         <div class="modal-card modal-card-lg">
           <div class="modal-header">
             <div class="modal-title-group">
-              <span class="modal-icon">📺</span>
-              <h3>Transmitir Sua Tela na Chamada</h3>
+              <span class="material-symbols-rounded modal-lead-icon">screen_share</span>
+              <h3>Transmitir Tela na Sala</h3>
             </div>
-            <button id="btn-close-share-modal" class="btn-icon-sm" title="Fechar">&times;</button>
+            <button id="btn-close-share-modal" class="btn-icon-ghost" title="Fechar">
+              <span class="material-symbols-rounded">close</span>
+            </button>
           </div>
           <div class="modal-body modal-scrollable">
             <div class="source-type-tabs">
-              <button class="modal-tab-btn tab-btn active" data-tab="monitors">🖥️ Monitores</button>
-              <button class="modal-tab-btn tab-btn" data-tab="windows">🪟 Aplicativos</button>
+              <button class="modal-tab-btn tab-btn active" data-tab="monitors">
+                <span class="material-symbols-rounded ms-sm">desktop_windows</span>
+                <span>Monitores</span>
+              </button>
+              <button class="modal-tab-btn tab-btn" data-tab="windows">
+                <span class="material-symbols-rounded ms-sm">window</span>
+                <span>Aplicativos</span>
+              </button>
             </div>
 
-            <!-- Lista de Fontes dentro do Modal -->
             <div class="sources-grid modal-sources-grid" id="modal-sources-grid">
               <div class="loading-sources">Carregando telas e janelas...</div>
             </div>
 
-            <!-- Miniatura da Fonte Selecionada -->
             <div class="source-preview-card" id="modal-source-preview-card">
               <div class="source-preview-header">
                 <div class="preview-header-left">
                   <span class="preview-dot"></span>
                   <span class="preview-title">Prévia da Captura</span>
                 </div>
-                <button id="btn-refresh-modal-preview" class="btn-secondary btn-sm" title="Capturar nova miniatura">🔄 Atualizar Prévia</button>
+                <button id="btn-refresh-modal-preview" class="btn-secondary btn-sm" title="Capturar nova miniatura">
+                  <span class="material-symbols-rounded ms-xs">refresh</span>
+                  <span>Atualizar Prévia</span>
+                </button>
               </div>
               <div class="source-preview-body">
                 <img id="modal-source-preview-img" class="source-preview-img hidden" alt="Miniatura da tela/janela" />
                 <div id="modal-source-preview-placeholder" class="source-preview-placeholder">
-                  <span>🖥️ Selecione um monitor ou janela acima para visualizar a prévia instantânea</span>
+                  <span class="material-symbols-rounded preview-placeholder-icon">desktop_windows</span>
+                  <span>Selecione um monitor ou janela acima para visualizar a prévia instantânea</span>
                 </div>
               </div>
             </div>
 
-            <!-- Controles de Configuração -->
             <div class="share-controls-card">
               <div class="control-row">
                 <div class="control-group">
-                  <label for="modal-codec-select">Codec de Vídeo:</label>
+                  <label for="modal-codec-select">
+                    <span class="material-symbols-rounded ms-xs">memory</span>
+                    Codec de Vídeo
+                  </label>
                   <select id="modal-codec-select">
-                    <option value="auto" selected>✨ Auto (H.264 Ultra-Compatível • Baixa Latência)</option>
-                    <option value="h264">🛡️ H.264 / AVC (Universal • Baixa Latência)</option>
-                    <option value="hevc">🚀 HEVC / H.265 (Alta Fidelidade)</option>
-                    <option value="av1">💎 AV1 (Máxima Eficiência • Menos Bitrate)</option>
+                    <option value="auto" selected>Auto (H.264 Ultra-Compatível • Baixa Latência)</option>
+                    <option value="h264">H.264 / AVC (Universal)</option>
+                    <option value="hevc">HEVC / H.265 (Alta Fidelidade)</option>
+                    <option value="av1">AV1 (Máxima Eficiência)</option>
                   </select>
                 </div>
 
                 <div class="control-group">
-                  <label for="modal-resolution-select">Qualidade / Resolução:</label>
+                  <label for="modal-resolution-select">
+                    <span class="material-symbols-rounded ms-xs">aspect_ratio</span>
+                    Qualidade / Resolução
+                  </label>
                   <select id="modal-resolution-select">
                     <option value="1080" selected>1080p (1920x1080) — Recomendado</option>
                     <option value="720">720p (1280x720) — Rápido</option>
@@ -342,35 +453,43 @@
                 </div>
 
                 <div class="control-group">
-                  <label for="modal-fps-select">Taxa de Quadros (FPS):</label>
+                  <label for="modal-fps-select">
+                    <span class="material-symbols-rounded ms-xs">speed</span>
+                    Taxa de Quadros (FPS)
+                  </label>
                   <select id="modal-fps-select">
-                    <option value="auto" selected>✨ Taxa do Monitor (Detectada)</option>
+                    <option value="auto" selected>Taxa do Monitor (Detectada)</option>
                     <option value="60">60 FPS (Padrão)</option>
                     <option value="120">120 FPS</option>
                     <option value="144">144 FPS</option>
                     <option value="240">240 FPS (Alta performance)</option>
-                    <option value="unlocked">🚀 Destravado (Sem limite)</option>
+                    <option value="unlocked">Destravado (Sem limite)</option>
                   </select>
                 </div>
 
                 <div class="control-group">
-                  <label for="modal-bitrate-select">Taxa de Bits (Bitrate):</label>
+                  <label for="modal-bitrate-select">
+                    <span class="material-symbols-rounded ms-xs">network_check</span>
+                    Taxa de Bits (Bitrate)
+                  </label>
                   <select id="modal-bitrate-select">
-                    <option value="auto" selected>⚡ Auto (Recomendado para Jogos)</option>
-                    <option value="20000">🚀 Ultra Gaming (20 Mbps)</option>
-                    <option value="14000">✨ Alta Qualidade (14 Mbps)</option>
-                    <option value="8000">⚖️ Equilibrado (8 Mbps)</option>
-                    <option value="4000">📉 Econômico (4 Mbps)</option>
+                    <option value="auto" selected>Auto (Recomendado para Jogos)</option>
+                    <option value="20000">Ultra Gaming (20 Mbps)</option>
+                    <option value="14000">Alta Qualidade (14 Mbps)</option>
+                    <option value="8000">Equilibrado (8 Mbps)</option>
+                    <option value="4000">Econômico (4 Mbps)</option>
                   </select>
                 </div>
 
                 <div class="control-group">
                   <label class="checkbox-label">
                     <input type="checkbox" id="modal-audio-enable-checkbox" checked />
+                    <span class="material-symbols-rounded ms-sm">volume_up</span>
                     <span>Transmitir Áudio do Sistema</span>
                   </label>
                   <div class="discord-badge">
-                    <span>🛡️ Discord.exe isolado automaticamente (sem eco)</span>
+                    <span class="material-symbols-rounded ms-xs">verified_user</span>
+                    <span>Discord.exe isolado automaticamente (sem eco)</span>
                   </div>
                 </div>
               </div>
@@ -379,7 +498,8 @@
           <div class="modal-footer">
             <button id="btn-cancel-modal-share" class="btn-secondary btn-sm">Cancelar</button>
             <button id="btn-start-modal-share" class="btn-primary btn-sm">
-              <span class="btn-icon">▶</span> Iniciar Transmissão
+              <span class="material-symbols-rounded ms-sm">play_arrow</span>
+              <span>Iniciar Transmissão</span>
             </button>
           </div>
         </div>
@@ -390,21 +510,23 @@
         <div class="modal-card">
           <div class="modal-header">
             <div class="modal-title-group">
-              <span class="modal-icon">🚀</span>
+              <span class="material-symbols-rounded modal-lead-icon">system_update_alt</span>
               <h3>Atualização do Luke-Share</h3>
             </div>
-            <button id="btn-close-update-modal" class="btn-icon-sm" title="Fechar">&times;</button>
+            <button id="btn-close-update-modal" class="btn-icon-ghost" title="Fechar">
+              <span class="material-symbols-rounded">close</span>
+            </button>
           </div>
           <div class="modal-body">
             <div class="update-version-row">
               <div class="version-box">
                 <span class="version-label">Versão Atual</span>
-                <span class="version-val current" id="update-curr-version">v0.2.0</span>
+                <span class="version-val current" id="update-curr-version">v0.3.5</span>
               </div>
-              <div class="version-arrow">➔</div>
+              <span class="material-symbols-rounded version-arrow">arrow_forward</span>
               <div class="version-box">
                 <span class="version-label">Nova Versão</span>
-                <span class="version-val new" id="update-new-version">v0.2.1</span>
+                <span class="version-val new" id="update-new-version">v0.3.6</span>
               </div>
             </div>
 
@@ -413,7 +535,6 @@
               <div class="notes-content" id="update-notes">Carregando notas da versão...</div>
             </div>
 
-            <!-- Progresso do Download -->
             <div id="update-progress-container" class="update-progress-container hidden">
               <div class="update-status-row">
                 <span id="update-status-text">Baixando atualização...</span>
@@ -425,11 +546,23 @@
             </div>
           </div>
           <div class="modal-footer" id="update-action-buttons">
-            <button id="btn-close-update-modal-secondary" class="btn-secondary btn-sm" onclick="document.getElementById('update-modal').classList.add('hidden')">Depois</button>
-            <button id="btn-start-update" class="btn-primary btn-sm">⚡ Atualizar e Reiniciar</button>
+            <button
+              id="btn-close-update-modal-secondary"
+              class="btn-secondary btn-sm"
+              onclick="document.getElementById('update-modal').classList.add('hidden')"
+            >
+              Depois
+            </button>
+            <button id="btn-start-update" class="btn-primary btn-sm">
+              <span class="material-symbols-rounded ms-sm">bolt</span>
+              <span>Atualizar e Reiniciar</span>
+            </button>
           </div>
         </div>
       </div>
+
+      <!-- Container de Notificações Flutuantes (Toasts) -->
+      <div id="toast-container" class="toast-container"></div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>

@@ -84,7 +84,7 @@ export class UpdaterManager {
 
     if (manual && this.btnCheckUpdates) {
       this.btnCheckUpdates.disabled = true;
-      this.btnCheckUpdates.innerHTML = `<span>⏳ Checando...</span>`;
+      this.btnCheckUpdates.innerHTML = `<span class="material-symbols-rounded ms-sm">hourglass_top</span><span>Checando...</span>`;
     }
 
     try {
@@ -109,7 +109,7 @@ export class UpdaterManager {
     } finally {
       if (manual && this.btnCheckUpdates) {
         this.btnCheckUpdates.disabled = false;
-        this.btnCheckUpdates.innerHTML = `<span>🔄 Atualizações</span>`;
+        this.btnCheckUpdates.innerHTML = `<span class="material-symbols-rounded ms-sm">sync</span><span>Atualizações</span><span id="update-badge" class="update-badge-dot hidden"></span>`;
       }
     }
   }

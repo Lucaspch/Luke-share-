@@ -185,7 +185,7 @@ export class ShareManager {
         if (!this.currentRoomTicket) return;
         navigator.clipboard.writeText(this.currentRoomTicket);
         const originalText = this.btnCopyTicket!.textContent;
-        this.btnCopyTicket!.textContent = "✅ Copiado!";
+        this.btnCopyTicket!.textContent = "Copiado!";
         setTimeout(() => {
           if (this.btnCopyTicket) {
             this.btnCopyTicket.textContent = originalText;
@@ -287,11 +287,11 @@ export class ShareManager {
 
   private updateAudioTag() {
     if (this.isAudioMuted) {
-      this.statAudioTag.textContent = "🔇 Áudio mutado";
-      this.btnToggleMute.textContent = "🔊 Desmutar";
+      this.statAudioTag.textContent = "Áudio mutado";
+      this.btnToggleMute.textContent = "Desmutar";
     } else {
-      this.statAudioTag.textContent = "🔊 Áudio ativo (Discord isolado)";
-      this.btnToggleMute.textContent = "🔇 Mutar Áudio";
+      this.statAudioTag.textContent = "Áudio ativo (Discord isolado)";
+      this.btnToggleMute.textContent = "Mutar Áudio";
     }
   }
 
@@ -357,13 +357,13 @@ export class ShareManager {
 
       if (src.kind === "Monitor") {
         card.innerHTML = `
-          <div class="source-icon">🖥️</div>
+          <div class="source-icon"><span class="material-symbols-rounded">desktop_windows</span></div>
           <div class="source-name" title="${this.escapeHtml(src.name)}">${this.escapeHtml(src.name)}</div>
           <div class="source-meta">${src.width}x${src.height} @ ${src.refresh_rate}Hz ${src.primary ? "• Principal" : ""}</div>
         `;
       } else {
         card.innerHTML = `
-          <div class="source-icon">🪟</div>
+          <div class="source-icon"><span class="material-symbols-rounded">window</span></div>
           <div class="source-name" title="${this.escapeHtml(src.title)}">${this.escapeHtml(src.title)}</div>
           <div class="source-meta">${this.escapeHtml(src.exe)} • PID ${src.pid} (${src.refresh_rate}Hz)</div>
         `;
@@ -372,30 +372,29 @@ export class ShareManager {
       if (isSelected && this.fpsSelect && src.refresh_rate) {
         const autoOpt = this.fpsSelect.querySelector('option[value="auto"]');
         if (autoOpt) {
-          autoOpt.textContent = `✨ Taxa do Monitor (${src.refresh_rate} Hz)`;
+          autoOpt.textContent = `Taxa do Monitor (${src.refresh_rate} Hz)`;
         }
       }
       if (isSelected && this.modal?.fpsSelect && src.refresh_rate) {
         const autoOpt = this.modal.fpsSelect.querySelector('option[value="auto"]');
         if (autoOpt) {
-          autoOpt.textContent = `✨ Taxa do Monitor (${src.refresh_rate} Hz)`;
+          autoOpt.textContent = `Taxa do Monitor (${src.refresh_rate} Hz)`;
         }
       }
 
       card.addEventListener("click", () => {
-        if (this.isSharing) return;
         this.selectedSourceId = src.id;
         this.updateSourceSnapshot(src.id);
         if (this.fpsSelect && src.refresh_rate) {
           const autoOpt = this.fpsSelect.querySelector('option[value="auto"]');
           if (autoOpt) {
-            autoOpt.textContent = `✨ Taxa do Monitor (${src.refresh_rate} Hz)`;
+            autoOpt.textContent = `Taxa do Monitor (${src.refresh_rate} Hz)`;
           }
         }
         if (this.modal?.fpsSelect && src.refresh_rate) {
           const autoOpt = this.modal.fpsSelect.querySelector('option[value="auto"]');
           if (autoOpt) {
-            autoOpt.textContent = `✨ Taxa do Monitor (${src.refresh_rate} Hz)`;
+            autoOpt.textContent = `Taxa do Monitor (${src.refresh_rate} Hz)`;
           }
         }
         this.renderSources();
@@ -550,7 +549,8 @@ export class ShareManager {
       alert("Falha ao iniciar transmissão: " + e);
     } finally {
       this.btnStart.disabled = false;
-      this.btnStart.innerHTML = '<span class="btn-icon">▶</span> Iniciar Transmissão';
+      this.btnStart.innerHTML =
+        '<span class="material-symbols-rounded">screen_share</span><span>Iniciar Transmissão</span>';
     }
   }
 

@@ -42,17 +42,20 @@ class App {
   // Elementos do Cabeçalho
   private myIpEl = document.getElementById("my-ip") as HTMLElement;
   private myStatusEl = document.getElementById("my-status") as HTMLElement;
+  private myStatusTextEl = document.getElementById("my-status-text") as HTMLElement | null;
   private nickInput = document.getElementById("nick-input") as HTMLInputElement;
   private btnSaveNick = document.getElementById("btn-save-nick") as HTMLButtonElement;
+  private topTicketPill = document.getElementById("top-ticket-pill") as HTMLButtonElement | null;
 
-  // Painéis Principais
+  // Painéis Principais do Palco
   private sharePanel = document.getElementById("share-panel") as HTMLElement;
   private watchPanel = document.getElementById("watch-panel") as HTMLElement;
 
-  // Elementos da Chamada / Multi-Stream (Watch Panel)
+  // Elementos da Chamada / Multi-Stream e Dock Inferior
   private streamsGridWrapper = document.getElementById("streams-grid-wrapper") as HTMLElement;
   private streamsGrid = document.getElementById("streams-grid") as HTMLElement;
   private streamsCountBadge = document.getElementById("streams-count-badge") as HTMLElement;
+  private gridModeLabel = document.getElementById("grid-mode-label") as HTMLElement | null;
   private btnCallShare = document.getElementById("btn-call-share") as HTMLButtonElement;
   private btnCallGridMode = document.getElementById("btn-call-grid-mode") as HTMLButtonElement;
   private btnStopAllWatch = document.getElementById("btn-stop-all-watch") as HTMLButtonElement;
@@ -72,6 +75,26 @@ class App {
     this.bindEvents();
   }
 
+  private showToast(message: string, iconName: string = "check_circle") {
+    const container = document.getElementById("toast-container");
+    if (!container) return;
+
+    const toast = document.createElement("div");
+    toast.className = "toast-item";
+    toast.innerHTML = `
+      <span class="material-symbols-rounded ms-sm">${iconName}</span>
+      <span>${this.escapeHtml(message)}</span>
+    `;
+    container.appendChild(toast);
+
+    setTimeout(() => {
+      toast.style.opacity = "0";
+      toast.style.transform = "translateY(8px)";
+      toast.style.transition = "all 0.2s ease";
+      setTimeout(() => toast.remove(), 220);
+    }, 2800);
+  }
+
   private async fetchMyInfo() {
     try {
       const info = await invoke<MyInfo>("get_my_info");
@@ -86,11 +109,11 @@ class App {
     if (!this.myInfo) return;
 
     if (this.myInfo.ip) {
-      this.myIpEl.textContent = `${this.myInfo.ip} • P2P Pronto`;
+      this.myIpEl.textContent = `${this.myInfo.ip} • P2P`;
       this.myIpEl.title = `Rede Local (${this.myInfo.ip}) + Iroh P2P Nativo`;
     } else {
       this.myIpEl.textContent = "P2P Nativo Pronto";
-      this.myIpEl.title = "Iroh P2P Nativo (Internet Direta sem VPN).";
+      this.myIpEl.title = "Iroh P2P Nativo (Internet Direta sem VPN)";
     }
 
     this.nickInput.value = this.myInfo.nick;
@@ -98,21 +121,29 @@ class App {
   }
 
   private updateStatusPill() {
-    const isSharing = this.shareManager?.getIsSharing() || false;
+    const isSharing = this.shareManager ? this.shareManager.getIsSharing() : false;
     const watchCount = this.activeStreams.size;
+
     this.myStatusEl.className = "status-pill";
+    const setStatusText = (txt: string) => {
+      if (this.myStatusTextEl) {
+        this.myStatusTextEl.textContent = txt;
+      } else {
+        this.myStatusEl.textContent = txt;
+      }
+    };
 
     if (isSharing && watchCount > 0) {
       this.myStatusEl.classList.add("streaming");
-      this.myStatusEl.textContent = `🔴 Transmitindo + 🟡 Assistindo (${watchCount})`;
+      setStatusText(`Transmitindo + Assistindo (${watchCount})`);
     } else if (isSharing) {
       this.myStatusEl.classList.add("streaming");
-      this.myStatusEl.textContent = "🔴 Transmitindo";
+      setStatusText("Transmitindo");
     } else if (watchCount > 0) {
       this.myStatusEl.classList.add("watching");
-      this.myStatusEl.textContent = `🟡 Assistindo (${watchCount})`;
+      setStatusText(`Assistindo (${watchCount})`);
     } else {
-      this.myStatusEl.textContent = "Ocioso";
+      setStatusText("Ocioso");
     }
   }
 
@@ -181,23 +212,26 @@ class App {
       (streaming) => {
         if (streaming) {
           this.btnCallShare.classList.add("active-share");
-          this.btnCallShare.innerHTML = '<span class="call-icon">🔴</span>';
-          this.btnCallShare.title = "Você está transmitindo tela (Clique para ver opções)";
+          this.btnCallShare.innerHTML = '<span class="material-symbols-rounded">cast_connected</span>';
+          this.btnCallShare.title = "Transmitindo ao vivo (Clique para gerenciar ou encerrar sua tela)";
 
           const ticket = this.shareManager.getRoomTicket();
-          const btnCallCopyTicket = document.getElementById("btn-call-copy-ticket") as HTMLButtonElement | null;
-          if (btnCallCopyTicket && ticket) {
-            btnCallCopyTicket.title = `Copiar Código da Sala: ${ticket}`;
+          if (this.topTicketPill && ticket) {
+            this.topTicketPill.classList.remove("hidden");
+            this.topTicketPill.title = `Copiar Código da Sala: ${ticket}`;
           }
 
-          // Entra imediatamente na Sala de Chamada (Grade de Vídeo estilo Discord)
+          // Entra imediatamente no Palco de Transmissão (Grade 1 / 2 / 4 Streams)
           this.sharePanel.classList.add("hidden");
           this.watchPanel.classList.remove("hidden");
           this.renderHostTile();
         } else {
           this.btnCallShare.classList.remove("active-share");
-          this.btnCallShare.innerHTML = '<span class="call-icon">🖥️</span>';
+          this.btnCallShare.innerHTML = '<span class="material-symbols-rounded">screen_share</span>';
           this.btnCallShare.title = "Compartilhar sua tela";
+          if (this.topTicketPill) {
+            this.topTicketPill.classList.add("hidden");
+          }
           this.removeHostTile();
         }
         this.updateStatusPill();
@@ -207,9 +241,9 @@ class App {
 
     // Atualiza contagem de espectadores e tráfego na miniatura do host na grade
     this.shareManager.onViewersCountChange = (_count, text) => {
-      const hostViewersEl = document.getElementById("host-tile-viewers");
+      const hostViewersEl = document.getElementById("host-tile-viewers-text");
       if (hostViewersEl) {
-        hostViewersEl.textContent = `👥 ${text}`;
+        hostViewersEl.textContent = text;
       }
     };
 
@@ -237,6 +271,7 @@ class App {
       try {
         await invoke("set_my_nick", { nick });
         if (this.myInfo) this.myInfo.nick = nick;
+        this.showToast(`Apelido atualizado para "${nick}"`, "check_circle");
       } catch (e) {
         alert("Erro ao salvar apelido: " + e);
       }
@@ -246,53 +281,78 @@ class App {
       if (e.key === "Enter") handleSaveNick();
     });
 
-    // Botão de Transmitir Tela dentro da chamada (Discord style)
-    this.btnCallShare.addEventListener("click", () => {
-      if (this.shareManager.getIsSharing()) {
-        const confirmStop = confirm(
-          "Você já está transmitindo sua tela nesta chamada.\n\nDeseja encerrar o compartilhamento da sua tela?"
-        );
-        if (confirmStop) {
-          this.shareManager.stopShare();
-        }
-      } else {
-        this.shareManager.openShareModal();
-      }
-    });
-
-    // Copiar Código da Sala no Dock da Chamada
-    const btnCallCopyTicket = document.getElementById("btn-call-copy-ticket") as HTMLButtonElement | null;
-    if (btnCallCopyTicket) {
-      btnCallCopyTicket.addEventListener("click", () => {
-        const ticket = this.shareManager.getRoomTicket();
-        if (ticket) {
-          navigator.clipboard.writeText(ticket);
-          const originalContent = btnCallCopyTicket.innerHTML;
-          btnCallCopyTicket.innerHTML = `<span class="call-icon">✅</span><span class="call-btn-label">Copiado!</span>`;
-          setTimeout(() => {
-            btnCallCopyTicket.innerHTML = originalContent;
-          }, 2000);
-        } else {
-          alert("Nenhum código de sala ativo no momento.\nInicie uma transmissão para gerar um código e convidar amigos!");
+    // Logo Home Click
+    const btnHomeLogo = document.getElementById("btn-home-logo");
+    if (btnHomeLogo) {
+      btnHomeLogo.addEventListener("click", (e) => {
+        e.preventDefault();
+        if (this.activeStreams.size === 0 && !this.shareManager.getIsSharing()) {
+          this.returnToSharePanel();
         }
       });
     }
 
-    // Mutar/Desmutar Microfone / Áudio do Sistema na Chamada
+    // Círculo 1 do Dock: Compartilhar Tela
+    this.btnCallShare.addEventListener("click", () => {
+      if (this.shareManager.getIsSharing()) {
+        const confirmStop = confirm(
+          "Você já está transmitindo sua tela nesta sala.\n\nDeseja encerrar o compartilhamento da sua tela?"
+        );
+        if (confirmStop) {
+          this.shareManager.stopShare();
+          this.showToast("Transmissão de tela encerrada", "stop_circle");
+        }
+      } else if (!this.watchPanel.classList.contains("hidden")) {
+        // Se já estiver assistindo amigos no palco, abre o modal para escolher a tela
+        this.shareManager.openShareModal();
+      } else {
+        // Se estiver no Estúdio inicial, inicia a transmissão da fonte selecionada imediatamente
+        this.shareManager.startShare(false);
+      }
+    });
+
+    // Copiar Código da Sala (Dock ou Pílula do Topo)
+    const copyRoomTicketAction = () => {
+      const ticket = this.shareManager.getRoomTicket();
+      if (ticket) {
+        navigator.clipboard.writeText(ticket);
+        this.showToast("Código da Sala copiado para a Área de Transferência!", "content_copy");
+      } else {
+        this.showToast("Inicie uma transmissão para gerar seu Código da Sala P2P", "info");
+      }
+    };
+
+    const btnCallCopyTicket = document.getElementById("btn-call-copy-ticket") as HTMLButtonElement | null;
+    if (btnCallCopyTicket) {
+      btnCallCopyTicket.addEventListener("click", copyRoomTicketAction);
+    }
+    if (this.topTicketPill) {
+      this.topTicketPill.addEventListener("click", copyRoomTicketAction);
+    }
+
+    // Círculo 2 do Dock: Mutar/Desmutar Áudio do Sistema
     const btnCallMuteMic = document.getElementById("btn-call-mute-mic") as HTMLButtonElement | null;
     const callMicIcon = document.getElementById("call-mic-icon") as HTMLElement | null;
     if (btnCallMuteMic) {
       btnCallMuteMic.addEventListener("click", async () => {
         const muted = await this.shareManager.toggleAudioMute();
         if (callMicIcon) {
-          callMicIcon.textContent = muted ? "🔇" : "🎙️";
+          callMicIcon.textContent = muted ? "volume_off" : "volume_up";
         }
-        btnCallMuteMic.title = muted ? "Desmutar áudio do sistema" : "Mutar áudio do sistema";
-        if (muted) {
-          btnCallMuteMic.classList.add("btn-call-muted");
-        } else {
-          btnCallMuteMic.classList.remove("btn-call-muted");
+        btnCallMuteMic.title = muted ? "Desmutar áudio da transmissão" : "Mutar áudio da transmissão";
+        btnCallMuteMic.classList.toggle("btn-call-muted", muted);
+
+        const hostMuteBtn = document.getElementById("btn-host-tile-mute");
+        if (hostMuteBtn) {
+          hostMuteBtn.innerHTML = muted
+            ? '<span class="material-symbols-rounded ms-xs">volume_up</span><span>Desmutar</span>'
+            : '<span class="material-symbols-rounded ms-xs">volume_off</span><span>Mutar Som</span>';
         }
+
+        this.showToast(
+          muted ? "Áudio do sistema mutado na transmissão" : "Áudio do sistema ativado na transmissão",
+          muted ? "volume_off" : "volume_up"
+        );
       });
     }
 
@@ -310,8 +370,16 @@ class App {
       }
     });
 
-    // Desconectar de todas as transmissões (Sair da Chamada)
-    this.btnStopAllWatch.addEventListener("click", () => this.stopAllWatching());
+    // Círculo 3 do Dock: Desconectar / Sair da Sala
+    this.btnStopAllWatch.addEventListener("click", () => {
+      if (this.activeStreams.size === 0 && !this.shareManager.getIsSharing()) {
+        this.shareManager.refreshSources();
+        this.showToast("Fontes de captura atualizadas", "refresh");
+        return;
+      }
+      this.stopAllWatching();
+      this.showToast("Você saiu da sala de transmissão", "call_end");
+    });
 
     // Modo Mini-Player (Compacto & Always on Top)
     const toggleMiniPlayer = async () => {
@@ -322,12 +390,10 @@ class App {
           document.body.classList.add("mini-player-active");
           await win.setAlwaysOnTop(true);
           await win.setSize(new LogicalSize(480, 290));
-          if (this.btnMiniPlayer) this.btnMiniPlayer.textContent = "🪟 Normal";
         } else {
           document.body.classList.remove("mini-player-active");
           await win.setAlwaysOnTop(false);
           await win.setSize(new LogicalSize(1100, 720));
-          if (this.btnMiniPlayer) this.btnMiniPlayer.textContent = "🪟 Mini-Player";
         }
       } catch (e) {
         console.warn("Falha ao alternar modo Mini-Player:", e);
@@ -343,8 +409,11 @@ class App {
 
     // Tela cheia
     this.btnFullscreen.addEventListener("click", () => {
+      const targetEl = !this.watchPanel.classList.contains("hidden")
+        ? this.streamsGridWrapper
+        : document.documentElement;
       if (!document.fullscreenElement) {
-        this.streamsGridWrapper.requestFullscreen().catch((err) => {
+        targetEl.requestFullscreen().catch((err) => {
           console.warn("Fullscreen falhou:", err);
         });
       } else {
@@ -354,13 +423,12 @@ class App {
   }
 
   /**
-   * Conecta a um amigo (ou código de sala lk-...) e adiciona uma tile à Grade da Chamada.
-   * Não encerra sua própria transmissão se estiver ativo!
+   * Conecta a um amigo (ou código de sala lk-...) e adiciona uma tile à Grade da Sala.
+   * Mantém sua própria transmissão ativa na grade simultaneamente!
    */
   private async startWatchingPeer(ip: string, nick: string) {
     const streamId = ip.trim();
 
-    // Se já estiver assistindo este stream, foca nele
     if (this.activeStreams.has(streamId)) {
       this.setStreamFocus(streamId);
       return;
@@ -370,16 +438,13 @@ class App {
     const displayHost = isTicket ? `Amigo (${nick === "Sala P2P" ? "P2P" : nick})` : nick;
     const displayAddr = isTicket ? "P2P Internet" : streamId;
 
-    // Alterna visualização para o Watch Panel da Chamada (sem parar transmissão ativa)
     this.sharePanel.classList.add("hidden");
     this.watchPanel.classList.remove("hidden");
 
-    // Se estiver transmitindo, assegura que a sua miniatura esteja presente na grade
     if (this.shareManager.getIsSharing()) {
       this.renderHostTile();
     }
 
-    // Cria o elemento Tile na grade
     const tile = document.createElement("div");
     tile.className = "stream-tile";
     tile.dataset.streamId = streamId;
@@ -394,23 +459,34 @@ class App {
       </div>
 
       <div class="tile-top-overlay">
-        <span class="badge-discord-live">🔴 LIVE</span>
+        <span class="badge-discord-live">
+          <span class="material-symbols-rounded ms-xs">sensors</span>
+          <span>LIVE</span>
+        </span>
         <span class="badge-tile-stat tile-stat-badge">Conectando...</span>
       </div>
 
       <div class="tile-user-pill">
-        <span class="tile-user-icon">🖥️</span>
+        <span class="material-symbols-rounded">desktop_windows</span>
         <span class="tile-user-name" title="${this.escapeHtml(displayHost)}">${this.escapeHtml(displayHost)}</span>
       </div>
 
       <div class="tile-actions-overlay">
         <div class="tile-volume-popover">
-          <button class="btn-tile-icon btn-tile-mute" title="Mutar áudio">🔊</button>
+          <button class="btn-tile-icon btn-tile-mute" title="Mutar áudio deste amigo">
+            <span class="material-symbols-rounded ms-sm">volume_up</span>
+          </button>
           <input type="range" class="tile-volume-slider" min="0" max="1" step="0.05" value="1" title="Volume individual" />
         </div>
-        <button class="btn-tile-icon btn-tile-pip" title="Picture-in-Picture">📌</button>
-        <button class="btn-tile-icon btn-tile-focus" title="Focar/Expandir este stream">⛶</button>
-        <button class="btn-tile-icon btn-tile-close" title="Desconectar desta transmissão">✕</button>
+        <button class="btn-tile-icon btn-tile-pip" title="Picture-in-Picture">
+          <span class="material-symbols-rounded ms-sm">picture_in_picture_alt</span>
+        </button>
+        <button class="btn-tile-icon btn-tile-focus" title="Focar/Expandir este stream (ou dê duplo clique)">
+          <span class="material-symbols-rounded ms-sm">open_in_full</span>
+        </button>
+        <button class="btn-tile-icon btn-tile-close" title="Desconectar desta transmissão">
+          <span class="material-symbols-rounded ms-sm">close</span>
+        </button>
       </div>
     `;
 
@@ -427,7 +503,6 @@ class App {
     let currentFps = "60 FPS";
     let currentCodec = "H.264";
 
-    // Inicializa o StreamPlayer dedicado para este tile
     const player = new StreamPlayer(
       canvas,
       overlay,
@@ -442,7 +517,6 @@ class App {
       }
     );
 
-    // Canal Tauri v2 IPC para pacotes de vídeo e áudio deste stream
     const onEvent = new Channel<StreamEvent>();
     onEvent.onmessage = (msg: StreamEvent) => {
       switch (msg.t) {
@@ -478,11 +552,12 @@ class App {
       }
     };
 
-    // Controle de volume individual (estilo Discord)
     volumeSlider.addEventListener("input", () => {
       const vol = parseFloat(volumeSlider.value);
       player.setVolume(vol);
-      btnMute.textContent = vol === 0 ? "🔇" : "🔊";
+      btnMute.innerHTML = `<span class="material-symbols-rounded ms-sm">${
+        vol === 0 ? "volume_off" : "volume_up"
+      }</span>`;
     });
 
     btnMute.addEventListener("click", () => {
@@ -495,12 +570,15 @@ class App {
       volumeSlider.dispatchEvent(new Event("input"));
     });
 
-    // Foco / Teatro
     btnFocus.addEventListener("click", () => {
       this.toggleFocusStream(streamId);
     });
 
-    // PiP
+    // Duplo clique no vídeo para expandir/restaurar na grade
+    canvas.addEventListener("dblclick", () => {
+      this.toggleFocusStream(streamId);
+    });
+
     btnPip.addEventListener("click", async () => {
       try {
         await player.togglePiP();
@@ -509,12 +587,10 @@ class App {
       }
     });
 
-    // Fechar stream
     btnClose.addEventListener("click", () => {
       this.stopWatchingPeer(streamId);
     });
 
-    // Registra o stream ativo
     const activeStream: ActiveStream = {
       id: streamId,
       nick: displayHost,
@@ -539,9 +615,6 @@ class App {
     }
   }
 
-  /**
-   * Encerra a visualização de um stream específico.
-   */
   private async stopWatchingPeer(streamId: string) {
     const stream = this.activeStreams.get(streamId);
     if (stream) {
@@ -563,15 +636,11 @@ class App {
     this.updateGridLayout();
     this.updateStatusPill();
 
-    // Se não houver mais nenhum stream e não estiver transmitindo, volta para a tela inicial
     if (this.activeStreams.size === 0 && !this.shareManager.getIsSharing()) {
       this.returnToSharePanel();
     }
   }
 
-  /**
-   * Desconecta de todas as transmissões assistidas.
-   */
   private async stopAllWatching() {
     try {
       await invoke("stop_watching", { streamId: null });
@@ -596,7 +665,6 @@ class App {
       } catch (_) {}
     }
 
-    // Se estiver transmitindo tela ao sair da chamada, encerra a transmissão também
     if (this.shareManager.getIsSharing()) {
       await this.shareManager.stopShare();
     }
@@ -612,7 +680,7 @@ class App {
   }
 
   /**
-   * Renderiza a miniatura ao vivo do próprio anfitrião na grade de chamadas.
+   * Renderiza a tile ao vivo do próprio anfitrião na grade da sala.
    */
   private renderHostTile() {
     if (this.hostTileElement) return;
@@ -631,20 +699,37 @@ class App {
       </div>
 
       <div class="tile-top-overlay">
-        <span class="badge-discord-live">🔴 LIVE</span>
-        <span class="badge-tile-stat" id="host-tile-viewers">👥 Live Ativa</span>
+        <span class="badge-discord-live">
+          <span class="material-symbols-rounded ms-xs">sensors</span>
+          <span>LIVE</span>
+        </span>
+        <span class="badge-tile-stat" id="host-tile-viewers">
+          <span class="material-symbols-rounded ms-xs">group</span>
+          <span id="host-tile-viewers-text">Live Ativa</span>
+        </span>
       </div>
 
       <div class="tile-user-pill">
-        <span class="tile-user-icon">🖥️</span>
+        <span class="material-symbols-rounded">desktop_windows</span>
         <span class="tile-user-name">Sua Transmissão (Você)</span>
       </div>
 
       <div class="tile-actions-overlay visible-always">
-        <button class="btn-tile-action-pill" id="btn-host-tile-copy" title="Copiar código da sala P2P">📋 Copiar Código</button>
-        <button class="btn-tile-action-pill" id="btn-host-tile-mute" title="Mutar/Desmutar som da sua transmissão">🔇 Mutar Som</button>
-        <button class="btn-tile-action-pill danger" id="btn-host-tile-stop" title="Encerrar transmissão">⏹ Encerrar</button>
-        <button class="btn-tile-icon btn-tile-focus" title="Focar sua live">⛶</button>
+        <button class="btn-tile-action-pill" id="btn-host-tile-copy" title="Copiar código da sala P2P">
+          <span class="material-symbols-rounded ms-xs">content_copy</span>
+          <span>Copiar Código</span>
+        </button>
+        <button class="btn-tile-action-pill" id="btn-host-tile-mute" title="Mutar/Desmutar som da sua transmissão">
+          <span class="material-symbols-rounded ms-xs">volume_off</span>
+          <span>Mutar Som</span>
+        </button>
+        <button class="btn-tile-action-pill danger" id="btn-host-tile-stop" title="Encerrar transmissão">
+          <span class="material-symbols-rounded ms-xs">stop_circle</span>
+          <span>Encerrar</span>
+        </button>
+        <button class="btn-tile-icon btn-tile-focus" title="Focar sua live (ou dê duplo clique)">
+          <span class="material-symbols-rounded ms-sm">open_in_full</span>
+        </button>
       </div>
     `;
 
@@ -655,10 +740,8 @@ class App {
     const btnStop = tile.querySelector("#btn-host-tile-stop") as HTMLButtonElement;
     const btnFocus = tile.querySelector(".btn-tile-focus") as HTMLButtonElement;
 
-    // StreamPlayer sem áudio para espelho local
     this.hostTilePlayer = new StreamPlayer(canvas, overlay, undefined, false);
 
-    // Configura dimensões e codec imediatamente com as informações salvas do host
     const shareInfo = this.shareManager.getShareInfo();
     if (shareInfo) {
       if (shareInfo.width && shareInfo.height) {
@@ -673,20 +756,30 @@ class App {
       const ticket = this.shareManager.getRoomTicket();
       if (!ticket) return;
       navigator.clipboard.writeText(ticket);
-      btnCopy.textContent = "✅ Copiado!";
-      setTimeout(() => (btnCopy.textContent = "📋 Copiar Código da Sala"), 2000);
+      this.showToast("Código da Sala copiado para a Área de Transferência!", "content_copy");
     });
 
     btnMute.addEventListener("click", async () => {
       const muted = await this.shareManager.toggleAudioMute();
-      btnMute.textContent = muted ? "🔊 Desmutar" : "🔇 Mutar Som";
+      btnMute.innerHTML = muted
+        ? '<span class="material-symbols-rounded ms-xs">volume_up</span><span>Desmutar</span>'
+        : '<span class="material-symbols-rounded ms-xs">volume_off</span><span>Mutar Som</span>';
+      const callMicIcon = document.getElementById("call-mic-icon");
+      const btnCallMuteMic = document.getElementById("btn-call-mute-mic");
+      if (callMicIcon) callMicIcon.textContent = muted ? "volume_off" : "volume_up";
+      if (btnCallMuteMic) btnCallMuteMic.classList.toggle("btn-call-muted", muted);
     });
 
     btnStop.addEventListener("click", () => {
       this.shareManager.stopShare();
+      this.showToast("Transmissão encerrada", "stop_circle");
     });
 
     btnFocus.addEventListener("click", () => {
+      this.toggleFocusStream("host");
+    });
+
+    canvas.addEventListener("dblclick", () => {
       this.toggleFocusStream("host");
     });
 
@@ -709,7 +802,6 @@ class App {
     }
     this.updateGridLayout();
 
-    // Se encerrou a transmissão e não está assistindo nenhum amigo, volta para a tela inicial
     if (this.activeStreams.size === 0) {
       this.returnToSharePanel();
     }
@@ -726,9 +818,10 @@ class App {
   private setStreamFocus(id: string) {
     this.focusedStreamId = id;
     this.streamsGrid.classList.add("has-focused");
-    this.btnCallGridMode.textContent = "⛶ Foco Ativo (Voltar à Grade)";
+    if (this.gridModeLabel) {
+      this.gridModeLabel.textContent = "Voltar à Grade";
+    }
 
-    // Remove foco anterior
     this.streamsGrid.querySelectorAll(".stream-tile").forEach((t) => t.classList.remove("focused"));
 
     if (id === "host") {
@@ -743,29 +836,30 @@ class App {
     this.focusedStreamId = null;
     this.streamsGrid.classList.remove("has-focused");
     this.streamsGrid.querySelectorAll(".stream-tile").forEach((t) => t.classList.remove("focused"));
-    this.btnCallGridMode.textContent = "🪟 Grade";
+    if (this.gridModeLabel) {
+      this.gridModeLabel.textContent = "Grade";
+    }
   }
 
-  /**
-   * Atualiza a responsividade da grade de vídeos conforme o número de streams conectados.
-   */
   private updateGridLayout() {
     const friendCount = this.activeStreams.size;
     const hasHost = this.hostTileElement !== null;
     const totalTiles = friendCount + (hasHost ? 1 : 0);
 
-    // Atualiza badge de contagem
     if (totalTiles === 0) {
-      this.streamsCountBadge.textContent = "0 transmissões";
+      this.streamsCountBadge.textContent = "Estúdio Pronto";
     } else if (hasHost && friendCount > 0) {
-      this.streamsCountBadge.textContent = `${friendCount} ${friendCount === 1 ? "amigo" : "amigos"} + sua live`;
+      this.streamsCountBadge.textContent = `${friendCount} ${
+        friendCount === 1 ? "amigo" : "amigos"
+      } + sua live`;
     } else if (hasHost) {
-      this.streamsCountBadge.textContent = "Sua live";
+      this.streamsCountBadge.textContent = "Sua live ativa";
     } else {
-      this.streamsCountBadge.textContent = `${friendCount} ${friendCount === 1 ? "stream ativo" : "streams ativos"}`;
+      this.streamsCountBadge.textContent = `${friendCount} ${
+        friendCount === 1 ? "stream ativo" : "streams ativos"
+      }`;
     }
 
-    // Configura classes de grade
     this.streamsGrid.classList.remove("count-1", "count-2", "count-3", "count-4", "count-many");
     if (totalTiles <= 1) {
       this.streamsGrid.classList.add("count-1");
@@ -783,7 +877,6 @@ class App {
   }
 }
 
-// Inicializa a aplicação ao carregar o DOM
 window.addEventListener("DOMContentLoaded", () => {
   new App();
 });
