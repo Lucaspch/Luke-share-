@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 
 use crate::audio::opus_enc::OpusEnc;
 use crate::audio::{AudioCapturer, AudioTarget};
@@ -31,8 +31,13 @@ pub type PreviewSink = Arc<dyn Fn(bool, u32, Vec<u8>) + Send + Sync>;
 
 pub struct SenderPipeline {
     stop: Arc<AtomicBool>,
-    encoder: Arc<H264Encoder>,
+    gpu: Gpu,
+    wgc_stop: Arc<AtomicBool>,
+    wgc_thread: Option<JoinHandle<()>>,
+    enc_tx: crossbeam_channel::Sender<EncodedFrame>,
+    encoder_holder: Arc<RwLock<Arc<H264Encoder>>>,
     audio_cap: AudioCapturer,
+    audio_tx: crossbeam_channel::Sender<Vec<f32>>,
     control_server: Arc<ControlServer>,
     pub p2p_host: Option<Arc<P2pHostManager>>,
     pub room_ticket: Option<RoomTicket>,
@@ -134,6 +139,7 @@ impl SenderPipeline {
         };
 
         let (enc_tx, enc_rx) = crossbeam_channel::bounded::<EncodedFrame>(32);
+        let enc_tx_clone = enc_tx.clone();
         let encoder = Arc::new(H264Encoder::start(
             &gpu,
             enc_cfg,
@@ -143,9 +149,11 @@ impl SenderPipeline {
             }),
         ).context("falha ao inicializar H264Encoder")?);
         let active_codec = encoder.codec;
+        let encoder_holder = Arc::new(RwLock::new(encoder.clone()));
 
         // 4. Inicializa Captura de Áudio WASAPI com exclusão do Discord
         let (audio_tx, audio_rx) = crossbeam_channel::bounded::<Vec<f32>>(8);
+        let audio_tx_clone = audio_tx.clone();
         let audio_target = match &source {
             SourceInfo::Monitor { .. } => AudioTarget::System,
             SourceInfo::Window { pid, .. } => AudioTarget::Window { pid: *pid },
@@ -188,18 +196,18 @@ impl SenderPipeline {
                 channels: 2,
             });
 
-            let enc_kf = encoder.clone();
+            let enc_kf = encoder_holder.clone();
             let kf_req = Arc::new(move || {
-                enc_kf.request_keyframe();
+                enc_kf.read().request_keyframe();
             });
 
             let cc_p2p = congestion_controller.clone();
-            let enc_p2p = encoder.clone();
+            let enc_p2p = encoder_holder.clone();
             let on_telemetry_p2p: Arc<dyn Fn(TelemetryReport) + Send + Sync> = Arc::new(move |rep| {
                 let loss = rep.loss_pct_x10 as f32 / 10.0;
                 let rtt = rep.rtt_ms as u32;
                 if let Some(new_br) = cc_p2p.lock().on_telemetry(rtt, loss) {
-                    enc_p2p.set_bitrate(new_br);
+                    enc_p2p.read().set_bitrate(new_br);
                 }
             });
 
@@ -220,10 +228,11 @@ impl SenderPipeline {
         };
 
         // --- Thread 1: WGC Capture -> Scaler -> Encoder ---
-        let st1 = stop.clone();
+        let wgc_stop = Arc::new(AtomicBool::new(false));
+        let st_wgc = wgc_stop.clone();
         let enc1 = encoder.clone();
         let wgc_thread = std::thread::Builder::new().name("sender-wgc-pump".into()).spawn(move || {
-            while !st1.load(Ordering::SeqCst) {
+            while !st_wgc.load(Ordering::SeqCst) {
                 match frame_rx.recv_timeout(Duration::from_millis(50)) {
                     Ok(frame) => match scaler.process(&frame.texture) {
                         Ok(nv12) => {
@@ -245,7 +254,7 @@ impl SenderPipeline {
         let cc2 = congestion_controller.clone();
         let ctrl2 = control_server.clone();
         let p2p_host_v = p2p_host.clone();
-        let enc2 = encoder.clone();
+        let enc2 = encoder_holder.clone();
         let sock_v = std_sock.try_clone()?;
         let pkts_sent_v = packets_sent.clone();
         let bytes_sent_v = bytes_sent.clone();
@@ -311,7 +320,7 @@ impl SenderPipeline {
                             let target_br = calculate_adaptive_bitrate(bitrate, total_viewers);
                             cc2.lock().set_max_bitrate(target_br);
                             let cur_br = cc2.lock().current_bitrate();
-                            enc2.set_bitrate(cur_br);
+                            enc2.read().set_bitrate(cur_br);
                             tracing::info!("sender: ajustando teto do bitrate adaptativo para {target_br} bps (atual: {cur_br} bps, {total_viewers} espectadores)");
                         }
 
@@ -443,7 +452,7 @@ impl SenderPipeline {
         let st4 = stop.clone();
         let ring4 = ring.clone();
         let cc_udp = congestion_controller.clone();
-        let enc4 = encoder.clone();
+        let enc4 = encoder_holder.clone();
         let sock_rx = std_sock.try_clone()?;
         let nacks_cnt = nacks_served.clone();
 
@@ -458,7 +467,7 @@ impl SenderPipeline {
                     last_pli = std::time::Instant::now();
                     pending_pli = false;
                     tracing::info!("sender: disparando IDR acumulado por PLI coalescing (fim da janela de 250ms)");
-                    enc4.request_keyframe();
+                    enc4.read().request_keyframe();
                 }
 
                 match sock_rx.recv_from(&mut buf) {
@@ -486,7 +495,7 @@ impl SenderPipeline {
                                         last_pli = now;
                                         pending_pli = false;
                                         tracing::info!("sender: PLI recebido de {from_addr}, gerando keyframe IDR imediato");
-                                        enc4.request_keyframe();
+                                        enc4.read().request_keyframe();
                                     } else {
                                         pending_pli = true;
                                         tracing::debug!("sender: PLI de {from_addr} agrupado (coalescing em janela de 250ms)");
@@ -497,7 +506,7 @@ impl SenderPipeline {
                                         let loss = rep.loss_pct_x10 as f32 / 10.0;
                                         let rtt = rep.rtt_ms as u32;
                                         if let Some(new_br) = cc_udp.lock().on_telemetry(rtt, loss) {
-                                            enc4.set_bitrate(new_br);
+                                            enc4.read().set_bitrate(new_br);
                                         }
                                     }
                                 }
@@ -516,8 +525,13 @@ impl SenderPipeline {
 
         Ok(Self {
             stop,
-            encoder,
+            gpu,
+            wgc_stop,
+            wgc_thread: Some(wgc_thread),
+            enc_tx: enc_tx_clone,
+            encoder_holder,
             audio_cap,
+            audio_tx: audio_tx_clone,
             control_server,
             p2p_host,
             room_ticket,
@@ -528,8 +542,154 @@ impl SenderPipeline {
             packets_sent,
             bytes_sent,
             nacks_served,
-            threads: vec![wgc_thread, video_thread, audio_thread, listener_thread, preview_thread],
+            threads: vec![video_thread, audio_thread, listener_thread, preview_thread],
         })
+    }
+
+    pub fn switch_source(
+        &mut self,
+        source: SourceInfo,
+        preset: Preset,
+        fps_target: Option<u32>,
+        custom_bitrate_kbps: Option<u32>,
+        codec_pref: Option<String>,
+        audio_muted: bool,
+    ) -> Result<()> {
+        tracing::info!("sender: Iniciando troca de fonte de transmissão...");
+
+        // 1. Para a thread WGC antiga e aguarda finalização
+        self.wgc_stop.store(true, Ordering::SeqCst);
+        if let Some(t) = self.wgc_thread.take() {
+            let _ = t.join();
+        }
+
+        // 2. Determina framerate e inicializa nova Captura WGC para obter as dimensões reais
+        let (capture_fps, effective_fps) = match fps_target {
+            None => {
+                let hz = source.refresh_rate().max(60);
+                (hz, hz)
+            }
+            Some(0) => (0, source.refresh_rate().max(60)),
+            Some(n) => (n, n),
+        };
+
+        let (frame_tx, frame_rx) = crossbeam_channel::bounded(4);
+        let cap = WgcCapture::start(&self.gpu, &source, capture_fps, frame_tx)
+            .context("falha ao criar novo WgcCapture durante switch")?;
+
+        let initial_size = cap.initial_size;
+        let (out_w, out_h) = target_size(initial_size.0, initial_size.1, preset);
+
+        let base_bitrate = if let Some(kbps) = custom_bitrate_kbps {
+            kbps * 1_000
+        } else {
+            preset.default_bitrate()
+        };
+        let bitrate = if effective_fps > 60 {
+            let scale_factor = (effective_fps as f32 / 60.0).sqrt();
+            (base_bitrate as f32 * scale_factor) as u32
+        } else {
+            base_bitrate
+        };
+
+        let requested_codec = codec_pref
+            .as_deref()
+            .map(VideoCodec::from_str_loose)
+            .unwrap_or(VideoCodec::Auto);
+
+        let enc_cfg = EncoderConfig {
+            width: out_w,
+            height: out_h,
+            fps: effective_fps,
+            bitrate,
+            codec: requested_codec,
+        };
+
+        // 3. Cria novo encoder H.264 e atualiza holder
+        let enc_tx = self.enc_tx.clone();
+        let new_encoder = Arc::new(H264Encoder::start(
+            &self.gpu,
+            enc_cfg,
+            true,
+            Box::new(move |ef| {
+                let _ = enc_tx.try_send(ef);
+            }),
+        ).context("falha ao inicializar novo H264Encoder durante switch")?);
+
+        *self.encoder_holder.write() = new_encoder.clone();
+        self.out_resolution = (out_w, out_h);
+        self.active_fps = effective_fps;
+        self.active_codec = new_encoder.codec;
+
+        // 4. Cria novo Scaler
+        let mut scaler = Scaler::new(&self.gpu, initial_size, (out_w, out_h), effective_fps)
+            .context("falha ao criar novo Scaler durante switch")?;
+
+        // 5. Inicia nova thread WGC
+        let wgc_stop = Arc::new(AtomicBool::new(false));
+        self.wgc_stop = wgc_stop.clone();
+        let st_wgc = wgc_stop;
+        let enc1 = new_encoder.clone();
+
+        let wgc_thread = std::thread::Builder::new().name("sender-wgc-pump".into()).spawn(move || {
+            while !st_wgc.load(Ordering::SeqCst) {
+                match frame_rx.recv_timeout(Duration::from_millis(50)) {
+                    Ok(frame) => match scaler.process(&frame.texture) {
+                        Ok(nv12) => {
+                            enc1.submit(nv12, frame.pts_100ns);
+                        }
+                        Err(e) => {
+                            tracing::warn!("sender: scaler falhou: {e:#}");
+                        }
+                    },
+                    Err(_) => {}
+                }
+            }
+            drop(cap);
+        })?;
+        self.wgc_thread = Some(wgc_thread);
+
+        // 6. Atualiza captura de áudio para a nova fonte
+        let audio_tx = self.audio_tx.clone();
+        let audio_target = match &source {
+            SourceInfo::Monitor { .. } => AudioTarget::System,
+            SourceInfo::Window { pid, .. } => AudioTarget::Window { pid: *pid },
+        };
+        if let Ok(new_audio_cap) = AudioCapturer::start(
+            audio_target,
+            &["discord.exe".into(), "discordcanary.exe".into(), "discordptb.exe".into()],
+            Box::new(move |pcm| {
+                let _ = audio_tx.try_send(pcm.to_vec());
+            }),
+        ) {
+            new_audio_cap.set_muted(audio_muted);
+            self.audio_cap = new_audio_cap;
+        }
+
+        // 7. Notifica todos os espectadores (UDP + P2P) via Control::Reconfigure
+        let reconfig = Control::Reconfigure {
+            video: VideoOffer {
+                width: out_w,
+                height: out_h,
+                fps: effective_fps,
+                codec: new_encoder.codec.as_str().to_string(),
+            },
+        };
+        let ctrl = self.control_server.clone();
+        let p2p = self.p2p_host.clone();
+        let reconfig_clone = reconfig.clone();
+        tauri::async_runtime::spawn(async move {
+            ctrl.broadcast(reconfig_clone.clone()).await;
+            if let Some(ref host) = p2p {
+                host.broadcast_control(reconfig_clone).await;
+            }
+        });
+
+        // 8. Requisita um IDR imediato
+        new_encoder.request_keyframe();
+        tracing::info!("sender: Troca de fonte de transmissão concluída com sucesso ({out_w}x{out_h} @ {effective_fps}fps)");
+
+        Ok(())
     }
 
     pub fn set_audio_muted(&self, muted: bool) {
@@ -545,13 +705,13 @@ impl SenderPipeline {
     }
 
     pub fn request_keyframe(&self) {
-        self.encoder.request_keyframe();
+        self.encoder_holder.read().request_keyframe();
     }
 
     pub fn keyframe_requester(&self) -> Arc<dyn Fn() + Send + Sync> {
-        let enc = self.encoder.clone();
+        let enc_holder = self.encoder_holder.clone();
         Arc::new(move || {
-            enc.request_keyframe();
+            enc_holder.read().request_keyframe();
         })
     }
 
@@ -593,8 +753,12 @@ impl SenderPipeline {
     }
 
     pub fn stop(&mut self) {
+        self.wgc_stop.store(true, Ordering::SeqCst);
         self.stop.store(true, Ordering::SeqCst);
         unsafe { let _ = windows::Win32::Media::timeEndPeriod(1); };
+        if let Some(t) = self.wgc_thread.take() {
+            let _ = t.join();
+        }
         for t in self.threads.drain(..) {
             let _ = t.join();
         }

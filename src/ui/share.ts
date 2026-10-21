@@ -224,13 +224,23 @@ export class ShareManager {
     }
   }
 
-  public openShareModal() {
+  public openShareModal(isSwitching: boolean = false) {
     if (!this.modal) return;
     this.modal.resolutionSelect.value = this.resolutionSelect.value;
     if (this.fpsSelect && this.modal.fpsSelect) this.modal.fpsSelect.value = this.fpsSelect.value;
     if (this.bitrateSelect && this.modal.bitrateSelect) this.modal.bitrateSelect.value = this.bitrateSelect.value;
     if (this.codecSelect && this.modal.codecSelect) this.modal.codecSelect.value = this.codecSelect.value;
     this.modal.audioCheckbox.checked = this.audioCheckbox.checked;
+
+    const titleEl = document.getElementById("modal-share-title");
+    const btnTextEl = document.getElementById("modal-share-start-btn-text");
+    if (isSwitching || this.isSharing) {
+      if (titleEl) titleEl.textContent = "Alternar Fonte de Transmissão";
+      if (btnTextEl) btnTextEl.textContent = "Alternar Tela";
+    } else {
+      if (titleEl) titleEl.textContent = "Transmitir Tela na Sala";
+      if (btnTextEl) btnTextEl.textContent = "Iniciar Transmissão";
+    }
 
     this.modal.modalBackdrop.classList.remove("hidden");
     this.refreshSources();
@@ -444,24 +454,28 @@ export class ShareManager {
       this.closeShareModal();
     }
 
+    const wasAlreadySharing = this.isSharing;
+
     try {
       this.btnStart.disabled = true;
-      this.btnStart.textContent = "Iniciando...";
+      this.btnStart.textContent = wasAlreadySharing ? "Alternando..." : "Iniciando...";
 
-      // Inicializa o StreamPlayer dedicado da pré-visualização (sem áudio local)
-      if (this.previewPlayer) {
-        this.previewPlayer.destroy();
+      if (!wasAlreadySharing) {
+        // Inicializa o StreamPlayer dedicado da pré-visualização (sem áudio local)
+        if (this.previewPlayer) {
+          this.previewPlayer.destroy();
+        }
+        this.hostPreviewOverlay.classList.remove("hidden");
+        this.previewPlayer = new StreamPlayer(
+          this.hostPreviewCanvas,
+          this.hostPreviewOverlay,
+          (stats) => {
+            this.previewFpsTag.textContent = `${stats.fps} FPS`;
+            this.previewResTag.textContent = `${stats.width}x${stats.height}`;
+          },
+          false // Áudio desabilitado no preview para evitar eco imediato
+        );
       }
-      this.hostPreviewOverlay.classList.remove("hidden");
-      this.previewPlayer = new StreamPlayer(
-        this.hostPreviewCanvas,
-        this.hostPreviewOverlay,
-        (stats) => {
-          this.previewFpsTag.textContent = `${stats.fps} FPS`;
-          this.previewResTag.textContent = `${stats.width}x${stats.height}`;
-        },
-        false // Áudio desabilitado no preview para evitar eco imediato
-      );
 
       // Cria o canal Tauri v2 para o feed de vídeo espelhado em tempo real
       const onPreview = new Channel<StreamEvent>();
@@ -515,12 +529,14 @@ export class ShareManager {
       this.statPort.textContent = `${info.media_port}`;
       this.previewFpsTag.textContent = `${info.fps} FPS`;
       this.previewResTag.textContent = `${info.width}x${info.height}`;
-      this.previewViewersCount.textContent = "0 assistindo";
-      if (this.onViewersChange) {
-        this.onViewersChange(0, [], "0 assistindo");
-      }
-      if (this.onViewersCountChange) {
-        this.onViewersCountChange(0, "0 assistindo");
+      if (!wasAlreadySharing) {
+        this.previewViewersCount.textContent = "0 assistindo";
+        if (this.onViewersChange) {
+          this.onViewersChange(0, [], "0 assistindo");
+        }
+        if (this.onViewersCountChange) {
+          this.onViewersCountChange(0, "0 assistindo");
+        }
       }
       this.updateAudioTag();
 
@@ -539,14 +555,16 @@ export class ShareManager {
         }
       }
 
-      // Inicia polling de estatísticas de espectadores
-      this.startStatsPolling();
+      // Inicia polling de estatísticas de espectadores se for início
+      if (!wasAlreadySharing) {
+        this.startStatsPolling();
+      }
 
       if (this.onStatusChange) {
         this.onStatusChange(true);
       }
     } catch (e) {
-      if (this.previewPlayer) {
+      if (!wasAlreadySharing && this.previewPlayer) {
         this.previewPlayer.destroy();
         this.previewPlayer = null;
       }

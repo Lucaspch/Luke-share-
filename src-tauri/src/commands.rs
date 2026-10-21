@@ -175,15 +175,6 @@ pub async fn start_share(
     audio_muted: bool,
     on_preview: Channel<StreamEvent>,
 ) -> Result<ShareInfo, String> {
-    // Para compartilhamento anterior se houver
-    {
-        let mut cur = state.active_sender.lock();
-        if let Some(mut prev) = cur.take() {
-            prev.stop();
-        }
-    }
-    state.control_server.stop();
-
     let sources = list_sources();
     let source = sources
         .into_iter()
@@ -196,6 +187,50 @@ pub async fn start_share(
         "480" | "480p" => Preset::P480,
         _ => Preset::P1080,
     };
+
+    // Seamless Switch: Se já houver um Sender ativo, alternamos a fonte sem reiniciar a sala
+    {
+        let mut active_lock = state.active_sender.lock();
+        if let Some(ref mut sender) = *active_lock {
+            tracing::info!("commands: Alternando fonte de transmissão no Sender ativo (Seamless Switch)");
+            sender
+                .switch_source(
+                    source,
+                    preset,
+                    fps_target,
+                    bitrate_kbps,
+                    codec,
+                    audio_muted,
+                )
+                .map_err(|e| format!("Erro ao alternar fonte de transmissão: {e:#}"))?;
+
+            let out_res = sender.out_resolution;
+            let active_fps = sender.active_fps;
+            let active_codec = sender.active_codec.as_str().to_string();
+            let media_port = sender.local_media_port;
+            let room_ticket = sender.room_ticket.as_ref().map(|t| t.raw.clone());
+
+            let _ = on_preview.send(StreamEvent::Config {
+                width: out_res.0,
+                height: out_res.1,
+                fps: active_fps,
+                codec: active_codec.clone(),
+            });
+
+            sender.request_keyframe();
+
+            return Ok(ShareInfo {
+                width: out_res.0,
+                height: out_res.1,
+                fps: active_fps,
+                codec: active_codec,
+                media_port,
+                room_ticket,
+            });
+        }
+    }
+
+    state.control_server.stop();
 
     let bind_ip = Ipv4Addr::UNSPECIFIED;
 

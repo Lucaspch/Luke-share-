@@ -315,19 +315,14 @@ class App {
       });
     }
 
-    // Círculo 1 do Dock: Compartilhar Tela
+    // Círculo 1 do Dock: Compartilhar Tela / Alternar Fonte (Seamless Switch)
     this.btnCallShare.addEventListener("click", () => {
       if (this.shareManager.getIsSharing()) {
-        const confirmStop = confirm(
-          "Você já está transmitindo sua tela nesta sala.\n\nDeseja encerrar o compartilhamento da sua tela?"
-        );
-        if (confirmStop) {
-          this.shareManager.stopShare();
-          this.showToast("Transmissão de tela encerrada", "stop_circle");
-        }
+        // Se já estiver transmitindo, abre o modal para alternar a tela/janela sem derrubar a sala
+        this.shareManager.openShareModal(true);
       } else if (!this.watchPanel.classList.contains("hidden")) {
         // Se já estiver assistindo amigos no palco, abre o modal para escolher a tela
-        this.shareManager.openShareModal();
+        this.shareManager.openShareModal(false);
       } else {
         // Se estiver no Estúdio inicial, inicia a transmissão da fonte selecionada imediatamente
         this.shareManager.startShare(false);
