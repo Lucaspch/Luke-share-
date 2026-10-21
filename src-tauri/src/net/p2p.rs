@@ -22,6 +22,7 @@ pub const LUKE_SHARE_ALPN: &[u8] = b"luke-share/1.0";
 
 /// Ticket de convite de sala compartilhável entre amigos.
 /// Contém o identificador criptográfico do nó e suas dicas de roteamento (relays e endereços diretos).
+/// Agora formatado em blocos elegantes Base58 (ex: LK-8F42-99AB-KL71-29PA) com compatibilidade retroativa.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RoomTicket {
     pub raw: String,
@@ -29,16 +30,51 @@ pub struct RoomTicket {
 
 impl RoomTicket {
     pub fn new(addr: &EndpointAddr) -> Result<Self> {
-        let json = serde_json::to_string(addr)?;
-        let b64 = crate::pipeline::base64_encode(json.as_bytes());
-        Ok(Self { raw: format!("lk-{}", b64) })
+        let json = serde_json::to_vec(addr)?;
+        // Comprime os dados JSON para reduzir significativamente o tamanho
+        let compressed = miniz_oxide::deflate::compress_to_vec(&json, 6);
+        // Codifica usando Base58 (sem caracteres confusos como 0, O, I, l)
+        let b58 = bs58::encode(&compressed).into_string();
+
+        // Agrupa em blocos de 4 caracteres separados por hífen (ex: LK-8F42-99AB-KL71...)
+        let mut formatted = String::from("LK");
+        for (i, c) in b58.chars().enumerate() {
+            if i % 4 == 0 {
+                formatted.push('-');
+            }
+            formatted.push(c);
+        }
+
+        Ok(Self { raw: formatted })
     }
 
     pub fn to_endpoint_addr(&self) -> Result<EndpointAddr> {
-        let trimmed = self.raw.strip_prefix("lk-").unwrap_or(&self.raw);
-        let bytes = base64_decode(trimmed)?;
-        let addr: EndpointAddr = serde_json::from_slice(&bytes)?;
-        Ok(addr)
+        let trimmed = self.raw.trim();
+
+        // 1. Tenta decodificar o novo formato formatado em blocos Base58 (LK-XXXX-XXXX...)
+        if trimmed.starts_with("LK-") || trimmed.starts_with("lk-") {
+            let without_prefix = &trimmed[3..];
+            let clean: String = without_prefix.chars().filter(|c| *c != '-').collect();
+            
+            // Tenta como Base58 comprimido
+            if let Ok(compressed) = bs58::decode(&clean).into_vec() {
+                if let Ok(decompressed) = miniz_oxide::inflate::decompress_to_vec(&compressed) {
+                    if let Ok(addr) = serde_json::from_slice::<EndpointAddr>(&decompressed) {
+                        return Ok(addr);
+                    }
+                }
+            }
+        }
+
+        // 2. Compatibilidade retroativa com o formato antigo (lk-Base64JSON)
+        let legacy_str = trimmed.strip_prefix("lk-").or_else(|| trimmed.strip_prefix("LK-")).unwrap_or(trimmed);
+        if let Ok(bytes) = base64_decode(legacy_str) {
+            if let Ok(addr) = serde_json::from_slice::<EndpointAddr>(&bytes) {
+                return Ok(addr);
+            }
+        }
+
+        anyhow::bail!("Código de sala LK inválido ou corrompido")
     }
 }
 

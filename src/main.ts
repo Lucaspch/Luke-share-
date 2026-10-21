@@ -452,7 +452,7 @@ class App {
       return;
     }
 
-    const isTicket = streamId.startsWith("lk-");
+    const isTicket = streamId.toLowerCase().startsWith("lk-");
     const displayHost = isTicket ? `Amigo (${nick === "Sala P2P" ? "P2P" : nick})` : nick;
     const displayAddr = isTicket ? "P2P Internet" : streamId;
 

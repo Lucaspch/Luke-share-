@@ -2588,12 +2588,14 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "luke-share"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "anyhow",
+ "bs58",
  "bytes",
  "crossbeam-channel",
  "iroh",
+ "miniz_oxide 0.9.1",
  "opus",
  "parking_lot",
  "serde",

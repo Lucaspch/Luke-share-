@@ -42,7 +42,7 @@ export class PeersManager {
     const handleAdd = async () => {
       const val = this.manualIpInput.value.trim();
       if (!val) return;
-      if (val.startsWith("lk-")) {
+      if (val.toLowerCase().startsWith("lk-")) {
         this.manualIpInput.value = "";
         this.closePopover();
         this.onWatchCallback(val, "Sala P2P");
