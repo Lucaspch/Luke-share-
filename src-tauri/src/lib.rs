@@ -24,9 +24,10 @@ pub fn run() {
     let bind_ip = Ipv4Addr::UNSPECIFIED;
     let broadcast = Some(Ipv4Addr::BROADCAST);
 
-    let default_nick = std::env::var("USERNAME")
-        .or_else(|_| std::env::var("USER"))
-        .unwrap_or_else(|_| "Luke-User".into());
+    let default_nick = commands::load_saved_nick()
+        .or_else(|| std::env::var("USERNAME").ok())
+        .or_else(|| std::env::var("USER").ok())
+        .unwrap_or_else(|| "Luke-User".into());
 
     let local_peer = LocalPeer::new(default_nick, CONTROL_PORT);
     let peer_table = PeerTable::new();

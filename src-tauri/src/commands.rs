@@ -73,10 +73,40 @@ pub fn get_my_info(state: State<'_, AppState>) -> Result<MyInfo, String> {
     })
 }
 
+fn get_saved_nick_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var("APPDATA")
+        .or_else(|_| std::env::var("LOCALAPPDATA"))
+        .ok()?;
+    let mut dir = std::path::PathBuf::from(base);
+    dir.push("Luke-Share");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.push("nick.txt");
+    Some(dir)
+}
+
+pub fn load_saved_nick() -> Option<String> {
+    let path = get_saved_nick_path()?;
+    if let Ok(content) = std::fs::read_to_string(path) {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+pub fn save_nick(nick: &str) {
+    if let Some(path) = get_saved_nick_path() {
+        let _ = std::fs::write(path, nick.trim());
+    }
+}
+
 #[tauri::command]
 pub fn set_my_nick(state: State<'_, AppState>, nick: String) -> Result<(), String> {
-    if !nick.trim().is_empty() {
-        state.local_peer.set_nick(nick.trim().to_string());
+    let trimmed = nick.trim();
+    if !trimmed.is_empty() {
+        state.local_peer.set_nick(trimmed.to_string());
+        save_nick(trimmed);
     }
     Ok(())
 }

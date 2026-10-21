@@ -20,7 +20,7 @@
   </head>
   <body>
     <div id="app">
-      <!-- 1. Cabeçalho Superior (Estilo Sketch: Logo Luke à esquerda, Versão/Update, Apelido e Status à direita) -->
+      <!-- 1. Cabeçalho Superior Unificado (Logo + Versão + P2P | Omnibar Central LK | Apelido + Status) -->
       <header class="app-header">
         <div class="header-left">
           <a href="#" class="brand-logo" id="btn-home-logo" title="Luke-Share — Início">
@@ -28,7 +28,7 @@
           </a>
 
           <div class="header-version-cluster">
-            <span class="version-tag">v0.3.7</span>
+            <span class="version-tag">v0.3.8</span>
             <button id="btn-check-updates" class="btn-check-update" title="Verificar atualizações">
               <span class="material-symbols-rounded ms-sm">sync</span>
               <span>Atualizações</span>
@@ -39,6 +39,90 @@
           <div class="network-badge" id="network-badge" title="Status da Rede P2P">
             <span class="status-dot green"></span>
             <span class="network-ip" id="my-ip">P2P Nativo Pronto</span>
+          </div>
+        </div>
+
+        <!-- Centro do Header: Área de Conexão Rápida (Código LK ou IP de Amigo) -->
+        <div class="header-center">
+          <div class="omnibar-wrapper">
+            <div class="omnibar-pill">
+              <span class="material-symbols-rounded omnibar-lead-icon">cast_connected</span>
+              <input
+                type="text"
+                id="manual-ip-input"
+                placeholder="Cole o código da sala (lk-...) ou IP para assistir..."
+                autocomplete="off"
+                spellcheck="false"
+              />
+
+              <!-- Botão de Peers Locais Descobertos -->
+              <button
+                id="btn-peers-toggle"
+                class="btn-omnibar-peers"
+                type="button"
+                title="Ver amigos na rede local e salas ativas"
+              >
+                <span class="material-symbols-rounded ms-sm">radar</span>
+                <span class="peers-label-text">Peers</span>
+                <span class="badge-count" id="peers-count">0</span>
+              </button>
+
+              <button id="btn-add-manual" class="btn-omnibar-enter" title="Conectar à transmissão">
+                <span>Entrar</span>
+              </button>
+            </div>
+
+            <!-- Pílula Rápida do Código da Sua Sala (Visível quando você está transmitindo) -->
+            <button
+              id="top-ticket-pill"
+              class="top-ticket-pill hidden"
+              title="Clique para copiar o Código da sua Sala P2P e enviar aos amigos"
+            >
+              <span class="material-symbols-rounded ms-sm">vpn_key</span>
+              <span class="ticket-pill-label">Código</span>
+              <span class="material-symbols-rounded ms-xs">content_copy</span>
+            </button>
+
+            <!-- Pílula de Espectadores na Sua Transmissão com Tooltip -->
+            <div id="top-viewers-wrapper" class="viewers-badge-wrapper top-viewers-wrapper hidden">
+              <div class="badge-tile-stat badge-viewers-pill" id="top-viewers-pill" title="Passe o mouse para ver quem está assistindo">
+                <span class="material-symbols-rounded ms-xs">group</span>
+                <span class="viewers-count-num" id="top-viewers-count">0</span>
+              </div>
+              <div class="viewers-tooltip">
+                <div class="viewers-tooltip-header">
+                  <span class="material-symbols-rounded ms-xs">visibility</span>
+                  <span>Assistindo sua tela (<strong class="tooltip-count" id="top-tooltip-count">0</strong>)</span>
+                </div>
+                <div class="viewers-tooltip-list" id="top-viewers-list">
+                  <div class="viewers-empty-state">
+                    <span class="material-symbols-rounded ms-xs">person_off</span>
+                    <span>Nenhum espectador ainda</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Chips Rápidos de Amigos Transmitindo Agora -->
+            <div id="live-peers-strip" class="live-peers-strip"></div>
+
+            <!-- Popover Flutuante de Peers Descobertos -->
+            <div id="peers-popover" class="peers-popover hidden">
+              <div class="peers-popover-header">
+                <div class="popover-title-group">
+                  <span class="material-symbols-rounded ms-sm">group</span>
+                  <h4>Amigos & Peers na Rede</h4>
+                </div>
+                <button id="btn-close-peers-popover" class="btn-icon-ghost" title="Fechar">
+                  <span class="material-symbols-rounded ms-sm">close</span>
+                </button>
+              </div>
+              <div class="peers-list" id="peers-list">
+                <div class="empty-peers">
+                  Buscando peers locais... Cole um Código de Sala (lk-...) na barra acima para conectar via Internet!
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -58,90 +142,6 @@
           </div>
         </div>
       </header>
-
-      <!-- 2. Barra Central de Conexão Rápida / Omnibar (Barra Azul Estilo Sketch) -->
-      <section class="omnibar-section">
-        <div class="omnibar-wrapper">
-          <div class="omnibar-pill">
-            <span class="material-symbols-rounded omnibar-lead-icon">cast_connected</span>
-            <input
-              type="text"
-              id="manual-ip-input"
-              placeholder="Cole o código da sala (lk-...) ou IP de um amigo para assistir..."
-              autocomplete="off"
-              spellcheck="false"
-            />
-
-            <!-- Botão de Peers Locais Descobertos -->
-            <button
-              id="btn-peers-toggle"
-              class="btn-omnibar-peers"
-              type="button"
-              title="Ver amigos na rede local e salas ativas"
-            >
-              <span class="material-symbols-rounded ms-sm">radar</span>
-              <span class="peers-label-text">Peers</span>
-              <span class="badge-count" id="peers-count">0</span>
-            </button>
-
-            <button id="btn-add-manual" class="btn-omnibar-enter" title="Conectar à transmissão">
-              <span>Entrar</span>
-            </button>
-          </div>
-
-          <!-- Pílula Rápida do Código da Sua Sala (Visível quando você está transmitindo) -->
-          <button
-            id="top-ticket-pill"
-            class="top-ticket-pill hidden"
-            title="Clique para copiar o Código da sua Sala P2P e enviar aos amigos"
-          >
-            <span class="material-symbols-rounded ms-sm">vpn_key</span>
-            <span class="ticket-pill-label">Código da Sala</span>
-            <span class="material-symbols-rounded ms-xs">content_copy</span>
-          </button>
-
-          <!-- Pílula de Espectadores na Sua Transmissão com Tooltip -->
-          <div id="top-viewers-wrapper" class="viewers-badge-wrapper top-viewers-wrapper hidden">
-            <div class="badge-tile-stat badge-viewers-pill" id="top-viewers-pill" title="Passe o mouse para ver quem está assistindo">
-              <span class="material-symbols-rounded ms-xs">group</span>
-              <span class="viewers-count-num" id="top-viewers-count">0</span>
-            </div>
-            <div class="viewers-tooltip">
-              <div class="viewers-tooltip-header">
-                <span class="material-symbols-rounded ms-xs">visibility</span>
-                <span>Assistindo sua tela (<strong class="tooltip-count" id="top-tooltip-count">0</strong>)</span>
-              </div>
-              <div class="viewers-tooltip-list" id="top-viewers-list">
-                <div class="viewers-empty-state">
-                  <span class="material-symbols-rounded ms-xs">person_off</span>
-                  <span>Nenhum espectador ainda</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Chips Rápidos de Amigos Transmitindo Agora -->
-          <div id="live-peers-strip" class="live-peers-strip"></div>
-
-          <!-- Popover Flutuante de Peers Descobertos -->
-          <div id="peers-popover" class="peers-popover hidden">
-            <div class="peers-popover-header">
-              <div class="popover-title-group">
-                <span class="material-symbols-rounded ms-sm">group</span>
-                <h4>Amigos & Peers na Rede</h4>
-              </div>
-              <button id="btn-close-peers-popover" class="btn-icon-ghost" title="Fechar">
-                <span class="material-symbols-rounded ms-sm">close</span>
-              </button>
-            </div>
-            <div class="peers-list" id="peers-list">
-              <div class="empty-peers">
-                Buscando peers locais... Cole um Código de Sala (lk-...) na barra acima para conectar via Internet!
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
 
       <!-- 3. Palco Central (Stage Principal — Estúdio de Configuração ou Grade 1 / 2 / 4 Streams) -->
       <main class="app-stage">

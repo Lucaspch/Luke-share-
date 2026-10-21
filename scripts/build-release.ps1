@@ -90,6 +90,8 @@ $signatureContent = (Get-Content $setupSig -Raw).Trim()
 
 # 5. Prepara pasta release-dist
 $distDir = Join-Path $rootDir "release-dist"
+Get-Process -Name "Luke-Share", "luke-share" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 300
 if (Test-Path $distDir) {
     Get-ChildItem -Path $distDir -File | Where-Object { $_.Name -like "*setup.exe*" -or $_.Name -like "*.sig" } | Remove-Item -Force -ErrorAction SilentlyContinue
 } else {

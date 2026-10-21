@@ -98,8 +98,13 @@ class App {
 
   private async fetchMyInfo() {
     try {
+      const savedNick = localStorage.getItem("luke_user_nick");
       const info = await invoke<MyInfo>("get_my_info");
       this.myInfo = info;
+      if (savedNick && savedNick.trim() && info.nick !== savedNick.trim()) {
+        await invoke("set_my_nick", { nick: savedNick.trim() }).catch(() => {});
+        this.myInfo.nick = savedNick.trim();
+      }
       this.updateMyInfoUI();
     } catch (e) {
       console.warn("Erro ao obter informações locais:", e);
@@ -280,6 +285,7 @@ class App {
       const nick = this.nickInput.value.trim();
       if (!nick) return;
       try {
+        localStorage.setItem("luke_user_nick", nick);
         await invoke("set_my_nick", { nick });
         if (this.myInfo) this.myInfo.nick = nick;
         this.showToast(`Apelido atualizado para "${nick}"`, "check_circle");
@@ -290,6 +296,12 @@ class App {
     this.btnSaveNick.addEventListener("click", handleSaveNick);
     this.nickInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") handleSaveNick();
+    });
+    this.nickInput.addEventListener("blur", () => {
+      const nick = this.nickInput.value.trim();
+      if (nick && (!this.myInfo || this.myInfo.nick !== nick)) {
+        handleSaveNick();
+      }
     });
 
     // Logo Home Click
