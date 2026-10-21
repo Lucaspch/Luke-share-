@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use iroh::{endpoint::presets, endpoint::Connection, Endpoint, EndpointAddr};
 use parking_lot::Mutex;
@@ -18,11 +18,149 @@ use std::time::Duration;
 use crate::net::protocol::*;
 use crate::net::transport::{parse_nack_payload, RetransmitRing};
 
+use sha2::{Digest, Sha256};
+use hmac::{Hmac, Mac};
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Nonce,
+};
+use rand::RngExt;
+
 pub const LUKE_SHARE_ALPN: &[u8] = b"luke-share/1.0";
+const LUKE_SECRET_SALT: &[u8] = b"LK-SHARE-SUPER-SECRET-CIPHER-2026-NATIVE-P2P";
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Deriva uma chave AES-256 e o nome do tópico anônimo a partir do código curto de 8 caracteres.
+/// Isso garante que:
+/// 1. Somente o Luke-Share (que possui o segredo interno do app) consegue decifrar os dados.
+/// 2. O servidor de relay na nuvem recebe apenas um blob criptografado com AES-GCM (Zero-Knowledge).
+fn derive_keys_from_short_code(code: &str) -> ([u8; 32], String) {
+    let clean: String = code
+        .trim()
+        .to_uppercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    let norm = clean.strip_prefix("LK").unwrap_or(&clean);
+
+    let mut mac = HmacSha256::new_from_slice(LUKE_SECRET_SALT).expect("HMAC can take key of any size");
+    mac.update(norm.as_bytes());
+    let derived_key: [u8; 32] = mac.finalize().into_bytes().into();
+
+    let mut topic_hasher = Sha256::new();
+    topic_hasher.update(b"LK-TOPIC-PREFIX-");
+    topic_hasher.update(&derived_key[..16]);
+    let topic = format!("lk_{}", hex::encode(&topic_hasher.finalize()[..12]));
+
+    (derived_key, topic)
+}
+
+/// Criptografa o EndpointAddr Iroh com AES-256-GCM usando chave derivada do código.
+fn encrypt_endpoint_addr(code: &str, addr: &EndpointAddr) -> Result<String> {
+    let (key_bytes, _) = derive_keys_from_short_code(code);
+    let cipher = Aes256Gcm::new_from_slice(&key_bytes)
+        .map_err(|e| anyhow!("Erro ao inicializar cifra AES-GCM: {e}"))?;
+
+    let json_bytes = serde_json::to_vec(addr)?;
+    let compressed = miniz_oxide::deflate::compress_to_vec(&json_bytes, 6);
+
+    // Gera Nonce aleatório de 12 bytes
+    let mut nonce_bytes = [0u8; 12];
+    rand::rng().fill(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let mut ciphertext = cipher
+        .encrypt(nonce, compressed.as_ref())
+        .map_err(|e| anyhow!("Falha na encriptação AES-GCM: {e}"))?;
+
+    let mut payload = nonce_bytes.to_vec();
+    payload.append(&mut ciphertext);
+
+    Ok(bs58::encode(payload).into_string())
+}
+
+/// Decifra o payload usando AES-256-GCM e o código de 8 caracteres informado.
+fn decrypt_endpoint_addr(code: &str, encrypted_b58: &str) -> Result<EndpointAddr> {
+    let (key_bytes, _) = derive_keys_from_short_code(code);
+    let cipher = Aes256Gcm::new_from_slice(&key_bytes)
+        .map_err(|e| anyhow!("Erro ao inicializar cifra AES-GCM: {e}"))?;
+
+    let payload = bs58::decode(encrypted_b58.trim())
+        .into_vec()
+        .context("Payload Base58 corrompido")?;
+
+    if payload.len() < 12 {
+        anyhow::bail!("Payload criptografado muito curto");
+    }
+
+    let (nonce_bytes, ciphertext) = payload.split_at(12);
+    let nonce = Nonce::from_slice(nonce_bytes);
+
+    let compressed = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|_| anyhow!("Código incorreto ou chave de decriptação inválida"))?;
+
+    let decompressed = miniz_oxide::inflate::decompress_to_vec(&compressed)
+        .map_err(|e| anyhow!("Falha ao descomprimir dados do anfitrião: {e:?}"))?;
+
+    let addr: EndpointAddr = serde_json::from_slice(&decompressed)?;
+    Ok(addr)
+}
+
+/// Publica a caixa postal criptografada de forma segura na nuvem.
+pub async fn publish_short_room_code(code: &str, addr: &EndpointAddr) -> Result<()> {
+    let encrypted_payload = encrypt_endpoint_addr(code, addr)?;
+    let (_, topic) = derive_keys_from_short_code(code);
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+
+    let url = format!("https://ntfy.sh/{}", topic);
+    let res = client
+        .post(&url)
+        .body(encrypted_payload)
+        .send()
+        .await?;
+
+    if !res.status().is_success() {
+        anyhow::bail!("Falha ao publicar código da sala (HTTP {})", res.status());
+    }
+
+    tracing::info!("p2p: Caixa postal da sala publicada com sucesso para código {}", code);
+    Ok(())
+}
+
+/// Consulta e decifra a caixa postal usando o código curto (LK-XXXX-XXXX).
+pub async fn resolve_short_room_code(code: &str) -> Result<EndpointAddr> {
+    let (_, topic) = derive_keys_from_short_code(code);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(6))
+        .build()?;
+
+    let url = format!("https://ntfy.sh/{}/raw?poll=1", topic);
+    let res = client
+        .get(&url)
+        .send()
+        .await
+        .context("Falha na conexão com a central de salas P2P")?;
+
+    if !res.status().is_success() {
+        anyhow::bail!("Sala não encontrada ou código expirado (HTTP {})", res.status());
+    }
+
+    let encrypted_payload = res.text().await?;
+    let trimmed = encrypted_payload.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("Sala ainda não iniciada ou código inválido");
+    }
+
+    decrypt_endpoint_addr(code, trimmed)
+}
 
 /// Ticket de convite de sala compartilhável entre amigos.
-/// Contém o identificador criptográfico do nó e suas dicas de roteamento (relays e endereços diretos).
-/// Agora formatado em blocos elegantes Base58 (ex: LK-8F42-99AB-KL71-29PA) com compatibilidade retroativa.
+/// Agora com o formato ultra-curto e elegante de 2 blocos de 4 caracteres: LK-XXXX-XXXX (ex: LK-7M2Q-9481).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RoomTicket {
     pub raw: String,
@@ -30,34 +168,62 @@ pub struct RoomTicket {
 
 impl RoomTicket {
     pub fn new(addr: &EndpointAddr) -> Result<Self> {
-        let json = serde_json::to_vec(addr)?;
-        // Comprime os dados JSON para reduzir significativamente o tamanho
-        let compressed = miniz_oxide::deflate::compress_to_vec(&json, 6);
-        // Codifica usando Base58 (sem caracteres confusos como 0, O, I, l)
-        let b58 = bs58::encode(&compressed).into_string();
-
-        // Agrupa em blocos de 4 caracteres separados por hífen (ex: LK-8F42-99AB-KL71...)
-        let mut formatted = String::from("LK");
-        for (i, c) in b58.chars().enumerate() {
-            if i % 4 == 0 {
-                formatted.push('-');
-            }
-            formatted.push(c);
+        // Gera código amigável de 8 caracteres em 2 blocos de 4
+        let charset = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+        let mut rng = rand::rng();
+        let mut part1 = String::with_capacity(4);
+        let mut part2 = String::with_capacity(4);
+        for _ in 0..4 {
+            let idx = rng.random_range(0..charset.len());
+            part1.push(charset[idx] as char);
+        }
+        for _ in 0..4 {
+            let idx = rng.random_range(0..charset.len());
+            part2.push(charset[idx] as char);
         }
 
-        Ok(Self { raw: formatted })
+        let code = format!("LK-{}-{}", part1, part2);
+
+        // Publica imediatamente em background na nuvem
+        let addr_clone = addr.clone();
+        let code_clone = code.clone();
+        tauri::async_runtime::spawn(async move {
+            for attempt in 1..=3 {
+                if let Err(e) = publish_short_room_code(&code_clone, &addr_clone).await {
+                    tracing::warn!("p2p: Tentativa {attempt} de publicar código falhou: {e:#}");
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                } else {
+                    break;
+                }
+            }
+        });
+
+        Ok(Self { raw: code })
     }
 
     pub fn to_endpoint_addr(&self) -> Result<EndpointAddr> {
         let trimmed = self.raw.trim();
 
-        // 1. Tenta decodificar o novo formato formatado em blocos Base58 (LK-XXXX-XXXX...)
+        // 1. Se for o código curto de 2 blocos de 4 caracteres (ex: LK-XXXX-XXXX)
+        let clean: String = trimmed
+            .to_uppercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect();
+
+        if clean.starts_with("LK") && clean.len() == 10 {
+            // Consulta de forma síncrona/bloqueante no runtime Tokio
+            return tauri::async_runtime::block_on(async {
+                resolve_short_room_code(trimmed).await
+            });
+        }
+
+        // 2. Se for formato formatado Base58 longo legado (LK-XXXX-XXXX-XXXX-...)
         if trimmed.starts_with("LK-") || trimmed.starts_with("lk-") {
             let without_prefix = &trimmed[3..];
-            let clean: String = without_prefix.chars().filter(|c| *c != '-').collect();
+            let clean_b58: String = without_prefix.chars().filter(|c| *c != '-').collect();
             
-            // Tenta como Base58 comprimido
-            if let Ok(compressed) = bs58::decode(&clean).into_vec() {
+            if let Ok(compressed) = bs58::decode(&clean_b58).into_vec() {
                 if let Ok(decompressed) = miniz_oxide::inflate::decompress_to_vec(&compressed) {
                     if let Ok(addr) = serde_json::from_slice::<EndpointAddr>(&decompressed) {
                         return Ok(addr);
@@ -66,7 +232,7 @@ impl RoomTicket {
             }
         }
 
-        // 2. Compatibilidade retroativa com o formato antigo (lk-Base64JSON)
+        // 3. Compatibilidade com o formato legado Base64
         let legacy_str = trimmed.strip_prefix("lk-").or_else(|| trimmed.strip_prefix("LK-")).unwrap_or(trimmed);
         if let Ok(bytes) = base64_decode(legacy_str) {
             if let Ok(addr) = serde_json::from_slice::<EndpointAddr>(&bytes) {
