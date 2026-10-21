@@ -11,6 +11,7 @@ export type StreamEvent =
   | { t: "audio"; d: string }
   | { t: "config"; width: number; height: number; fps: number; codec?: string }
   | { t: "audio_state"; enabled: boolean }
+  | { t: "viewers"; count: number; viewers: string[] }
   | {
       t: "telemetry";
       rtt_ms: number;

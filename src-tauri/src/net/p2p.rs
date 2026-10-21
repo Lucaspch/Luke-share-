@@ -167,6 +167,13 @@ impl P2pHostManager {
         }
     }
 
+    /// Transmite a lista e contagem atualizada de espectadores para todos os conectados via P2P.
+    pub async fn broadcast_viewers(&self) {
+        let list: Vec<String> = self.viewers.lock().values().map(|v| v.nick.clone()).collect();
+        let count = list.len() as u32;
+        self.broadcast_control(Control::ViewersUpdate { count, viewers: list }).await;
+    }
+
     /// Inicia a escuta de conexões Iroh em segundo plano, servindo NACKs do RetransmitRing e PLIs.
     pub fn start_listener(
         self: Arc<Self>,
@@ -275,6 +282,7 @@ impl P2pHostManager {
                                 tx_ctrl,
                             };
                             this.add_viewer(viewer);
+                            this.broadcast_viewers().await;
 
                             // Tarefa A: Envio de controle para o espectador
                             let send_task = tokio::spawn(async move {
@@ -385,6 +393,7 @@ impl P2pHostManager {
                             recv_dg_task.abort();
                             this.remove_viewer(&peer_id);
                             this.unregister_relay(&peer_id);
+                            this.broadcast_viewers().await;
                             tracing::info!("p2p_host: espectador P2P desconectado: {nick} ({peer_id})");
                         });
                     }

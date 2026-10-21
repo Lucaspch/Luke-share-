@@ -77,6 +77,30 @@ impl ControlServer {
         }
     }
 
+    pub async fn broadcast_viewers_map(viewers: &Arc<Mutex<HashMap<Uuid, ViewerSession>>>) {
+        let list: Vec<String> = {
+            let m = viewers.lock();
+            m.values().map(|v| v.nick.clone()).collect()
+        };
+        let count = list.len() as u32;
+        let msg = Control::ViewersUpdate { count, viewers: list };
+        let sessions: Vec<ViewerSession> = {
+            let m = viewers.lock();
+            m.values()
+                .map(|v| ViewerSession {
+                    peer_id: v.peer_id,
+                    nick: v.nick.clone(),
+                    ip: v.ip,
+                    media_port: v.media_port,
+                    tx_ctrl: v.tx_ctrl.clone(),
+                })
+                .collect()
+        };
+        for s in sessions {
+            let _ = s.send(msg.clone()).await;
+        }
+    }
+
     pub fn stop(&self) {
         self.shutdown.notify_waiters();
         self.viewers.lock().clear();
@@ -143,6 +167,7 @@ impl ControlServer {
                                 tx_ctrl,
                             };
                             viewers.lock().insert(peer_id, session);
+                            Self::broadcast_viewers_map(&viewers).await;
 
                             // Loop de escrita para o viewer
                             let write_task = tokio::spawn(async move {
@@ -163,6 +188,7 @@ impl ControlServer {
 
                             write_task.abort();
                             viewers.lock().remove(&peer_id);
+                            Self::broadcast_viewers_map(&viewers).await;
                             on_viewer_left(peer_id);
                         });
                     }
@@ -192,6 +218,7 @@ impl ViewerClient {
         my_media_udp_port: u16,
         on_reconfigure: Arc<dyn Fn(VideoOffer) + Send + Sync>,
         on_audio_state: Arc<dyn Fn(bool) + Send + Sync>,
+        on_viewers_update: Arc<dyn Fn(u32, Vec<String>) + Send + Sync>,
     ) -> Result<Self> {
         let addr = SocketAddr::V4(SocketAddrV4::new(sharer_ip, sharer_ctrl_port));
         let stream = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr))
@@ -235,6 +262,7 @@ impl ViewerClient {
                         match ctrl {
                             Ok(Control::Reconfigure { video }) => on_reconfigure(video),
                             Ok(Control::AudioState { enabled }) => on_audio_state(enabled),
+                            Ok(Control::ViewersUpdate { count, viewers }) => on_viewers_update(count, viewers),
                             Ok(Control::Bye) | Err(_) => break,
                             _ => {}
                         }

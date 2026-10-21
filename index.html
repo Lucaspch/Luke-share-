@@ -28,7 +28,7 @@
           </a>
 
           <div class="header-version-cluster">
-            <span class="version-tag">v0.3.6</span>
+            <span class="version-tag">v0.3.7</span>
             <button id="btn-check-updates" class="btn-check-update" title="Verificar atualizações">
               <span class="material-symbols-rounded ms-sm">sync</span>
               <span>Atualizações</span>
@@ -99,6 +99,26 @@
             <span class="ticket-pill-label">Código da Sala</span>
             <span class="material-symbols-rounded ms-xs">content_copy</span>
           </button>
+
+          <!-- Pílula de Espectadores na Sua Transmissão com Tooltip -->
+          <div id="top-viewers-wrapper" class="viewers-badge-wrapper top-viewers-wrapper hidden">
+            <div class="badge-tile-stat badge-viewers-pill" id="top-viewers-pill" title="Passe o mouse para ver quem está assistindo">
+              <span class="material-symbols-rounded ms-xs">group</span>
+              <span class="viewers-count-num" id="top-viewers-count">0</span>
+            </div>
+            <div class="viewers-tooltip">
+              <div class="viewers-tooltip-header">
+                <span class="material-symbols-rounded ms-xs">visibility</span>
+                <span>Assistindo sua tela (<strong class="tooltip-count" id="top-tooltip-count">0</strong>)</span>
+              </div>
+              <div class="viewers-tooltip-list" id="top-viewers-list">
+                <div class="viewers-empty-state">
+                  <span class="material-symbols-rounded ms-xs">person_off</span>
+                  <span>Nenhum espectador ainda</span>
+                </div>
+              </div>
+            </div>
+          </div>
 
           <!-- Chips Rápidos de Amigos Transmitindo Agora -->
           <div id="live-peers-strip" class="live-peers-strip"></div>

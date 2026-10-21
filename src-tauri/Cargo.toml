@@ -1,6 +1,6 @@
 [package]
 name = "luke-share"
-version = "0.3.6"
+version = "0.3.7"
 edition = "2021"
 default-run = "luke-share"
 description = "Screenshare P2P de ultra-baixa latência nativo sobre a Internet"

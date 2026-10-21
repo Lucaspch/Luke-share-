@@ -1267,6 +1267,197 @@ button {
   opacity: 1;
 }
 
+/* Container do Badge Interativo de Espectadores com Tooltip (Estilo Referencia) */
+.viewers-badge-wrapper {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  pointer-events: auto; /* Permite interacao do mouse mesmo com overlay pointer-events: none */
+}
+
+/* Badge arredondado com icone de pessoa/grupo e contador */
+.badge-viewers-pill {
+  background-color: rgba(4, 19, 31, 0.88);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(0, 242, 254, 0.35);
+  color: #f1f5f9;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  opacity: 0.95;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.badge-viewers-pill:hover,
+.viewers-badge-wrapper:hover .badge-viewers-pill {
+  background-color: rgba(6, 30, 50, 0.98);
+  border-color: var(--neon-cyan);
+  color: #ffffff;
+  box-shadow: 0 0 14px rgba(0, 242, 254, 0.35);
+  transform: translateY(-1px);
+}
+
+.badge-viewers-pill .material-symbols-rounded {
+  color: var(--neon-cyan);
+  font-size: 16px;
+}
+
+.viewers-count-num {
+  font-family: var(--font-mono);
+  font-weight: 800;
+  font-size: 0.78rem;
+  color: #38bdf8;
+}
+
+.badge-viewers-pill:hover .viewers-count-num,
+.viewers-badge-wrapper:hover .viewers-count-num {
+  color: #ffffff;
+}
+
+/* Tooltip / Popover flutuante suspenso exibindo os nomes dos espectadores */
+.viewers-tooltip {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0; /* Alinha a direita dentro do overlay superior */
+  min-width: 170px;
+  max-width: 250px;
+  background-color: rgba(4, 19, 31, 0.97);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(0, 242, 254, 0.4);
+  border-radius: 12px;
+  padding: 10px 12px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.85), 0 0 20px rgba(0, 242, 254, 0.15);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-6px) scale(0.96);
+  transform-origin: top right;
+  transition: opacity 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+              transform 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+              visibility 0.18s;
+  pointer-events: none;
+  z-index: 1000;
+}
+
+/* Seta indicativa no topo */
+.viewers-tooltip::before {
+  content: "";
+  position: absolute;
+  top: -5px;
+  right: 14px;
+  width: 10px;
+  height: 10px;
+  background-color: #04131f;
+  border-left: 1px solid rgba(0, 242, 254, 0.4);
+  border-top: 1px solid rgba(0, 242, 254, 0.4);
+  transform: rotate(45deg);
+}
+
+.viewers-badge-wrapper:hover .viewers-tooltip,
+.viewers-badge-wrapper:focus-within .viewers-tooltip {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0) scale(1);
+  pointer-events: auto;
+}
+
+/* Titulo da lista de espectadores */
+.viewers-tooltip-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--neon-cyan);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  margin-bottom: 8px;
+}
+
+.viewers-tooltip-header strong {
+  color: #ffffff;
+  font-family: var(--font-mono);
+}
+
+/* Lista de nomes com scroll suave */
+.viewers-tooltip-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.viewer-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #e2e8f0;
+  transition: all 0.15s ease;
+}
+
+.viewer-entry:hover {
+  background: rgba(0, 242, 254, 0.15);
+  color: #ffffff;
+  transform: translateX(2px);
+}
+
+.viewer-entry .material-symbols-rounded {
+  color: #38bdf8;
+  font-size: 16px;
+}
+
+.viewer-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.viewers-empty-state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.75rem;
+  color: #64748b;
+  padding: 6px 4px;
+  font-style: italic;
+}
+
+/* No Omnibar superior */
+.top-viewers-wrapper {
+  margin-left: 6px;
+}
+
+.top-viewers-wrapper .viewers-tooltip {
+  left: 0;
+  right: auto;
+  transform-origin: top left;
+}
+
+.top-viewers-wrapper .viewers-tooltip::before {
+  left: 14px;
+  right: auto;
+}
+
+.top-viewers-wrapper .badge-viewers-pill {
+  padding: 6px 14px;
+  font-size: 0.8rem;
+  height: 38px;
+}
+
 /* Pílula Inferior Esquerda com Nome do Usuário */
 .tile-user-pill {
   position: absolute;

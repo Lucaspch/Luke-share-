@@ -47,6 +47,8 @@ pub enum Control {
     Reconfigure { video: VideoOffer },
     /// sharer → viewer: áudio ligado/desligado
     AudioState { enabled: bool },
+    /// sharer → viewer: lista atualizada de espectadores assistindo a live
+    ViewersUpdate { count: u32, viewers: Vec<String> },
     Bye,
 }
 

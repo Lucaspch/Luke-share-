@@ -103,6 +103,7 @@ export class ShareManager {
   private modal?: ModalShareElements;
   public onPreviewStreamEvent?: (msg: StreamEvent) => void;
   public onViewersCountChange?: (count: number, text: string) => void;
+  public onViewersChange?: (count: number, viewers: string[], text: string) => void;
   private currentShareInfo: ShareInfo | null = null;
 
   private currentSources: SourceInfo[] = [];
@@ -515,6 +516,9 @@ export class ShareManager {
       this.previewFpsTag.textContent = `${info.fps} FPS`;
       this.previewResTag.textContent = `${info.width}x${info.height}`;
       this.previewViewersCount.textContent = "0 assistindo";
+      if (this.onViewersChange) {
+        this.onViewersChange(0, [], "0 assistindo");
+      }
       if (this.onViewersCountChange) {
         this.onViewersCountChange(0, "0 assistindo");
       }
@@ -593,6 +597,9 @@ export class ShareManager {
           const nacks = stats.nacks_served > 0 ? ` • ${stats.nacks_served} NACKs atendidos` : "";
           const text = `${count} ${count === 1 ? "assistindo" : "assistindo"} • ${mb} MB${nacks}`;
           this.previewViewersCount.textContent = text;
+          if (this.onViewersChange) {
+            this.onViewersChange(count, stats.viewers || [], text);
+          }
           if (this.onViewersCountChange) {
             this.onViewersCountChange(count, text);
           }
@@ -620,6 +627,9 @@ export class ShareManager {
       this.isSharing = false;
       this.currentRoomTicket = null;
       this.currentShareInfo = null;
+      if (this.onViewersChange) {
+        this.onViewersChange(0, [], "0 assistindo");
+      }
       if (this.roomTicketBox) {
         this.roomTicketBox.classList.add("hidden");
       }

@@ -46,6 +46,7 @@ class App {
   private nickInput = document.getElementById("nick-input") as HTMLInputElement;
   private btnSaveNick = document.getElementById("btn-save-nick") as HTMLButtonElement;
   private topTicketPill = document.getElementById("top-ticket-pill") as HTMLButtonElement | null;
+  private topViewersWrapper = document.getElementById("top-viewers-wrapper") as HTMLElement | null;
 
   // Painéis Principais do Palco
   private sharePanel = document.getElementById("share-panel") as HTMLElement;
@@ -220,6 +221,10 @@ class App {
             this.topTicketPill.classList.remove("hidden");
             this.topTicketPill.title = `Copiar Código da Sala: ${ticket}`;
           }
+          if (this.topViewersWrapper) {
+            this.topViewersWrapper.classList.remove("hidden");
+            this.updateViewersBadge(this.topViewersWrapper, 0, []);
+          }
 
           // Entra imediatamente no Palco de Transmissão (Grade 1 / 2 / 4 Streams)
           this.sharePanel.classList.add("hidden");
@@ -232,6 +237,10 @@ class App {
           if (this.topTicketPill) {
             this.topTicketPill.classList.add("hidden");
           }
+          if (this.topViewersWrapper) {
+            this.topViewersWrapper.classList.add("hidden");
+            this.updateViewersBadge(this.topViewersWrapper, 0, []);
+          }
           this.removeHostTile();
         }
         this.updateStatusPill();
@@ -239,11 +248,13 @@ class App {
       }
     );
 
-    // Atualiza contagem de espectadores e tráfego na miniatura do host na grade
-    this.shareManager.onViewersCountChange = (_count, text) => {
-      const hostViewersEl = document.getElementById("host-tile-viewers-text");
-      if (hostViewersEl) {
-        hostViewersEl.textContent = text;
+    // Atualiza contagem de espectadores e lista de quem está assistindo (Host e barra superior)
+    this.shareManager.onViewersChange = (count, viewers, _text) => {
+      const hostWrapper = document.getElementById("host-viewers-wrapper") as HTMLElement | null;
+      this.updateViewersBadge(hostWrapper, count, viewers);
+
+      if (this.topViewersWrapper) {
+        this.updateViewersBadge(this.topViewersWrapper, count, viewers);
       }
     };
 
@@ -464,6 +475,24 @@ class App {
           <span>LIVE</span>
         </span>
         <span class="badge-tile-stat tile-stat-badge">Conectando...</span>
+        <div class="viewers-badge-wrapper tile-viewers-wrapper">
+          <div class="badge-tile-stat badge-viewers-pill" title="Passe o mouse para ver quem está assistindo">
+            <span class="material-symbols-rounded ms-xs">group</span>
+            <span class="viewers-count-num">0</span>
+          </div>
+          <div class="viewers-tooltip">
+            <div class="viewers-tooltip-header">
+              <span class="material-symbols-rounded ms-xs">visibility</span>
+              <span>Assistindo (<strong class="tooltip-count">0</strong>)</span>
+            </div>
+            <div class="viewers-tooltip-list">
+              <div class="viewers-empty-state">
+                <span class="material-symbols-rounded ms-xs">person_off</span>
+                <span>Nenhum espectador ainda</span>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="tile-user-pill">
@@ -540,6 +569,11 @@ class App {
           }
           statBadge.textContent = `${currentRes} • ${currentFps} • ${currentCodec}`;
           break;
+        case "viewers": {
+          const wrapper = tile.querySelector(".tile-viewers-wrapper") as HTMLElement | null;
+          this.updateViewersBadge(wrapper, msg.count, msg.viewers);
+          break;
+        }
         case "telemetry":
           currentFps = `${msg.fps} FPS`;
           const fecInfo = msg.fec_recovered ? ` • FEC:${msg.fec_recovered}` : "";
@@ -703,10 +737,24 @@ class App {
           <span class="material-symbols-rounded ms-xs">sensors</span>
           <span>LIVE</span>
         </span>
-        <span class="badge-tile-stat" id="host-tile-viewers">
-          <span class="material-symbols-rounded ms-xs">group</span>
-          <span id="host-tile-viewers-text">Live Ativa</span>
-        </span>
+        <div class="viewers-badge-wrapper" id="host-viewers-wrapper">
+          <div class="badge-tile-stat badge-viewers-pill" id="host-viewers-pill" title="Passe o mouse para ver quem está assistindo">
+            <span class="material-symbols-rounded ms-xs">group</span>
+            <span class="viewers-count-num" id="host-viewers-count">0</span>
+          </div>
+          <div class="viewers-tooltip" id="host-viewers-tooltip">
+            <div class="viewers-tooltip-header">
+              <span class="material-symbols-rounded ms-xs">visibility</span>
+              <span>Assistindo sua tela (<strong class="tooltip-count" id="host-tooltip-count">0</strong>)</span>
+            </div>
+            <div class="viewers-tooltip-list" id="host-viewers-list">
+              <div class="viewers-empty-state">
+                <span class="material-symbols-rounded ms-xs">person_off</span>
+                <span>Nenhum espectador ainda</span>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="tile-user-pill">
@@ -869,6 +917,38 @@ class App {
       this.streamsGrid.classList.add("count-4");
     } else {
       this.streamsGrid.classList.add("count-many");
+    }
+  }
+
+  private updateViewersBadge(wrapper: HTMLElement | null, count: number, viewers: string[]) {
+    if (!wrapper) return;
+    const countEl = wrapper.querySelector(".viewers-count-num");
+    const tooltipCountEl = wrapper.querySelector(".tooltip-count");
+    const listEl = wrapper.querySelector(".viewers-tooltip-list");
+
+    if (countEl) countEl.textContent = `${count}`;
+    if (tooltipCountEl) tooltipCountEl.textContent = `${count}`;
+
+    if (listEl) {
+      if (!viewers || viewers.length === 0) {
+        listEl.innerHTML = `
+          <div class="viewers-empty-state">
+            <span class="material-symbols-rounded ms-xs">person_off</span>
+            <span>Nenhum espectador ainda</span>
+          </div>
+        `;
+      } else {
+        listEl.innerHTML = viewers
+          .map(
+            (name) => `
+          <div class="viewer-entry">
+            <span class="material-symbols-rounded ms-xs">person</span>
+            <span class="viewer-name">${this.escapeHtml(name)}</span>
+          </div>
+        `
+          )
+          .join("");
+      }
     }
   }
 

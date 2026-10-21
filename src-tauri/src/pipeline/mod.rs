@@ -34,6 +34,11 @@ pub enum StreamEvent {
     AudioState {
         enabled: bool,
     },
+    #[serde(rename = "viewers")]
+    Viewers {
+        count: u32,
+        viewers: Vec<String>,
+    },
     #[serde(rename = "ended")]
     Ended {
         reason: String,

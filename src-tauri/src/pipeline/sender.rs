@@ -572,11 +572,21 @@ impl SenderPipeline {
     pub fn viewers_info(&self) -> Vec<String> {
         let mut list = Vec::new();
         for v in self.control_server.viewers() {
-            list.push(format!("{} ({})", v.nick, v.ip));
+            let n = v.nick.trim();
+            if !n.is_empty() {
+                list.push(n.to_string());
+            } else {
+                list.push(format!("Espectador ({})", v.ip));
+            }
         }
         if let Some(ref host) = self.p2p_host {
             for (id, nick) in host.viewers_info() {
-                list.push(format!("{} (P2P:{})", nick, &id.to_string()[..8]));
+                let n = nick.trim();
+                if !n.is_empty() {
+                    list.push(n.to_string());
+                } else {
+                    list.push(format!("Espectador ({})", &id.to_string()[..6]));
+                }
             }
         }
         list

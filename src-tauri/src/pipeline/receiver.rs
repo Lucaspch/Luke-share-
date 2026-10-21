@@ -96,6 +96,7 @@ impl ReceiverPipeline {
         // 2. Conecta ao host via TCP de controle
         let sink_reconfig = event_sink.clone();
         let sink_audio = event_sink.clone();
+        let sink_viewers = event_sink.clone();
         let client = ViewerClient::connect(
             sharer_ip,
             sharer_ctrl_port,
@@ -112,6 +113,9 @@ impl ReceiverPipeline {
             }),
             Arc::new(move |enabled| {
                 sink_audio(StreamEvent::AudioState { enabled });
+            }),
+            Arc::new(move |count, viewers| {
+                sink_viewers(StreamEvent::Viewers { count, viewers });
             }),
         )
         .await
@@ -450,6 +454,7 @@ impl ReceiverPipeline {
         let st_ctrl = stop.clone();
         let sink_ctrl_reconfig = event_sink.clone();
         let sink_ctrl_audio = event_sink.clone();
+        let sink_ctrl_viewers = event_sink.clone();
         let ctrl_task = tokio::spawn(async move {
             while !st_ctrl.load(Ordering::SeqCst) {
                 match read_control(&mut recv_ctrl).await {
@@ -463,6 +468,9 @@ impl ReceiverPipeline {
                     }
                     Ok(Control::AudioState { enabled }) => {
                         sink_ctrl_audio(StreamEvent::AudioState { enabled });
+                    }
+                    Ok(Control::ViewersUpdate { count, viewers }) => {
+                        sink_ctrl_viewers(StreamEvent::Viewers { count, viewers });
                     }
                     Ok(Control::Bye) => {
                         st_ctrl.store(true, Ordering::SeqCst);
