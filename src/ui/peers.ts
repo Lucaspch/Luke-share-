@@ -8,31 +8,49 @@ export interface PeerInfo {
   ctrl_port: number;
 }
 
+export interface FriendInfo {
+  tag: string;
+  nick: string;
+  public_key_b58: string;
+  status: "PendingOut" | "PendingIn" | "Accepted" | "Blocked";
+  is_online: boolean;
+  is_streaming: boolean;
+  room_code: string | null;
+}
+
 export class PeersManager {
   private peersContainer: HTMLElement;
   private peersCountBadge: HTMLElement;
   private manualIpInput: HTMLInputElement;
   private btnAddManual: HTMLButtonElement;
   private onWatchCallback: (ip: string, nick: string) => void;
+  private onToast?: (msg: string, icon?: string) => void;
   private knownPeers: PeerInfo[] = [];
+  private knownFriends: FriendInfo[] = [];
 
   private btnPeersToggle = document.getElementById("btn-peers-toggle") as HTMLButtonElement | null;
   private peersPopover = document.getElementById("peers-popover") as HTMLElement | null;
   private btnClosePopover = document.getElementById("btn-close-peers-popover") as HTMLButtonElement | null;
   private livePeersStrip = document.getElementById("live-peers-strip") as HTMLElement | null;
 
+  private friendsContainer = document.getElementById("friends-list") as HTMLElement | null;
+  private addFriendInput = document.getElementById("add-friend-input") as HTMLInputElement | null;
+  private btnSubmitAddFriend = document.getElementById("btn-submit-add-friend") as HTMLButtonElement | null;
+
   constructor(
     peersContainer: HTMLElement,
     peersCountBadge: HTMLElement,
     manualIpInput: HTMLInputElement,
     btnAddManual: HTMLButtonElement,
-    onWatch: (ip: string, nick: string) => void
+    onWatch: (ip: string, nick: string) => void,
+    onToast?: (msg: string, icon?: string) => void
   ) {
     this.peersContainer = peersContainer;
     this.peersCountBadge = peersCountBadge;
     this.manualIpInput = manualIpInput;
     this.btnAddManual = btnAddManual;
     this.onWatchCallback = onWatch;
+    this.onToast = onToast;
 
     this.bindEvents();
     this.startPolling();
@@ -63,6 +81,26 @@ export class PeersManager {
     this.manualIpInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") handleAdd();
     });
+
+    if (this.btnSubmitAddFriend && this.addFriendInput) {
+      const handleAddFriend = async () => {
+        const tag = this.addFriendInput!.value.trim().toUpperCase();
+        if (!tag) return;
+        try {
+          const res = await invoke<string>("send_friend_request", { targetTag: tag });
+          this.addFriendInput!.value = "";
+          if (this.onToast) this.onToast(res, "person_add");
+          await this.refreshFriends();
+        } catch (e) {
+          alert("Erro ao adicionar amigo: " + e);
+        }
+      };
+
+      this.btnSubmitAddFriend.addEventListener("click", handleAddFriend);
+      this.addFriendInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") handleAddFriend();
+      });
+    }
 
     if (this.btnPeersToggle && this.peersPopover) {
       this.btnPeersToggle.addEventListener("click", (e) => {
@@ -96,7 +134,126 @@ export class PeersManager {
 
   private startPolling() {
     this.refreshPeers();
-    setInterval(() => this.refreshPeers(), 1500);
+    this.refreshFriends();
+    setInterval(() => {
+      this.refreshPeers();
+      this.refreshFriends();
+    }, 2000);
+  }
+
+  public async refreshFriends() {
+    try {
+      const notifications = await invoke<string[]>("sync_friends_inbox");
+      if (notifications && notifications.length > 0 && this.onToast) {
+        for (const notif of notifications) {
+          this.onToast(notif, "notifications");
+        }
+      }
+
+      const friends = await invoke<FriendInfo[]>("list_friends");
+      this.knownFriends = friends;
+      this.renderFriends();
+    } catch (e) {
+      console.warn("Erro ao sincronizar amigos:", e);
+    }
+  }
+
+  private renderFriends() {
+    if (!this.friendsContainer) return;
+    if (this.knownFriends.length === 0) {
+      this.friendsContainer.innerHTML =
+        '<div class="empty-peers">Nenhum amigo adicionado ainda. Digite a Tag do amigo acima para adicionar!</div>';
+      return;
+    }
+
+    this.friendsContainer.innerHTML = "";
+    for (const f of this.knownFriends) {
+      const item = document.createElement("div");
+      item.className = "friend-item-card";
+
+      let statusBadge = "";
+      let actionsHtml = "";
+
+      if (f.status === "PendingIn") {
+        statusBadge = `<span style="color:#f59e0b; font-size:0.7rem; font-weight:700;">Solicitação Recebida</span>`;
+        actionsHtml = `
+          <button class="btn-primary btn-xs btn-accept" data-tag="${f.tag}" title="Aceitar Amizade">Aceitar</button>
+          <button class="btn-secondary btn-xs btn-reject" data-tag="${f.tag}" title="Recusar">Recusar</button>
+        `;
+      } else if (f.status === "PendingOut") {
+        statusBadge = `<span style="color:#94a3b8; font-size:0.7rem;">Pendente...</span>`;
+        actionsHtml = `
+          <button class="btn-secondary btn-xs btn-remove" data-tag="${f.tag}" title="Cancelar Pedido">Cancelar</button>
+        `;
+      } else if (f.status === "Accepted") {
+        if (f.is_streaming && f.room_code) {
+          statusBadge = `<span style="color:#f43f5e; font-size:0.7rem; font-weight:800; display:inline-flex; align-items:center; gap:3px;">
+            <span class="material-symbols-rounded" style="font-size:12px;">sensors</span> EM LIVE
+          </span>`;
+          actionsHtml = `
+            <button class="btn-knock-live btn-knock" data-tag="${f.tag}" data-room="${f.room_code}" data-nick="${this.escapeHtml(f.nick)}">
+              <span class="material-symbols-rounded" style="font-size:14px;">play_arrow</span>
+              <span>Assistir</span>
+            </button>
+          `;
+        } else if (f.is_online) {
+          statusBadge = `<span style="color:#10b981; font-size:0.7rem;">Online</span>`;
+        } else {
+          statusBadge = `<span style="color:#64748b; font-size:0.7rem;">Offline</span>`;
+        }
+      }
+
+      item.innerHTML = `
+        <div class="friend-info-col">
+          <div class="friend-nick-row">
+            <span class="material-symbols-rounded ms-xs" style="color:var(--accent-cyan-bright);">account_circle</span>
+            <span>${this.escapeHtml(f.nick || f.tag)}</span>
+            ${statusBadge}
+          </div>
+          <div class="friend-tag-sub">${f.tag}</div>
+        </div>
+        <div class="friend-actions-row">
+          ${actionsHtml}
+        </div>
+      `;
+
+      const btnAccept = item.querySelector(".btn-accept") as HTMLButtonElement | null;
+      if (btnAccept) {
+        btnAccept.addEventListener("click", async () => {
+          await invoke("respond_friend_request", { friendTag: f.tag, accept: true });
+          if (this.onToast) this.onToast(`Você agora é amigo de ${f.nick}!`, "check_circle");
+          this.refreshFriends();
+        });
+      }
+
+      const btnReject = item.querySelector(".btn-reject") as HTMLButtonElement | null;
+      if (btnReject) {
+        btnReject.addEventListener("click", async () => {
+          await invoke("respond_friend_request", { friendTag: f.tag, accept: false });
+          this.refreshFriends();
+        });
+      }
+
+      const btnRemove = item.querySelector(".btn-remove") as HTMLButtonElement | null;
+      if (btnRemove) {
+        btnRemove.addEventListener("click", async () => {
+          await invoke("remove_friend", { friendTag: f.tag });
+          this.refreshFriends();
+        });
+      }
+
+      const btnKnock = item.querySelector(".btn-knock") as HTMLButtonElement | null;
+      if (btnKnock) {
+        btnKnock.addEventListener("click", () => {
+          this.closePopover();
+          if (f.room_code) {
+            this.onWatchCallback(f.room_code, f.nick);
+          }
+        });
+      }
+
+      this.friendsContainer.appendChild(item);
+    }
   }
 
   public async refreshPeers() {

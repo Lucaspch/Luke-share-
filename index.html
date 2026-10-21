@@ -28,7 +28,7 @@
           </a>
 
           <div class="header-version-cluster">
-            <span class="version-tag">v0.3.11</span>
+            <span class="version-tag">v0.4.0</span>
             <button id="btn-check-updates" class="btn-check-update" title="Verificar atualizações">
               <span class="material-symbols-rounded ms-sm">sync</span>
               <span>Atualizações</span>
@@ -106,20 +106,49 @@
             <!-- Chips Rápidos de Amigos Transmitindo Agora -->
             <div id="live-peers-strip" class="live-peers-strip"></div>
 
-            <!-- Popover Flutuante de Peers Descobertos -->
+            <!-- Popover Flutuante de Amigos & Peers Descobertos -->
             <div id="peers-popover" class="peers-popover hidden">
               <div class="peers-popover-header">
                 <div class="popover-title-group">
                   <span class="material-symbols-rounded ms-sm">group</span>
-                  <h4>Amigos & Peers na Rede</h4>
+                  <h4>Lista de Amigos & Salas</h4>
                 </div>
                 <button id="btn-close-peers-popover" class="btn-icon-ghost" title="Fechar">
                   <span class="material-symbols-rounded ms-sm">close</span>
                 </button>
               </div>
+
+              <!-- Formulário Rápido de Adicionar Amigo por Tag -->
+              <div class="add-friend-box">
+                <input
+                  type="text"
+                  id="add-friend-input"
+                  placeholder="Digitar Tag do amigo (ex: LK#7M2Q)..."
+                  maxlength="10"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+                <button id="btn-submit-add-friend" class="btn-primary btn-xs" title="Enviar solicitação de amizade">
+                  <span class="material-symbols-rounded ms-xs">person_add</span>
+                  <span>Adicionar</span>
+                </button>
+              </div>
+
+              <div class="friends-section-title">
+                <span class="material-symbols-rounded ms-xs">favorite</span>
+                <span>Seus Amigos</span>
+              </div>
+              <div class="friends-list" id="friends-list">
+                <div class="empty-peers">Nenhum amigo adicionado ainda. Adicione pela Tag acima!</div>
+              </div>
+
+              <div class="friends-section-title">
+                <span class="material-symbols-rounded ms-xs">lan</span>
+                <span>Rede Local / Peers Descobertos</span>
+              </div>
               <div class="peers-list" id="peers-list">
                 <div class="empty-peers">
-                  Buscando peers locais... Cole um Código de Sala (lk-...) na barra acima para conectar via Internet!
+                  Buscando peers locais...
                 </div>
               </div>
             </div>
@@ -134,6 +163,11 @@
               <button id="btn-save-nick" class="btn-icon-ghost" title="Salvar apelido">
                 <span class="material-symbols-rounded ms-sm">save</span>
               </button>
+            </div>
+            <div class="my-tag-pill" id="my-tag-pill" title="Clique para copiar sua Tag de Amigo (ex: LK#7M2Q)">
+              <span class="material-symbols-rounded ms-xs">tag</span>
+              <span id="my-tag-text">LK#----</span>
+              <span class="material-symbols-rounded ms-xs copy-icon">content_copy</span>
             </div>
             <div class="status-pill" id="my-status">
               <span class="status-pill-dot"></span>

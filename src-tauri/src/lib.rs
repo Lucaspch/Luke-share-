@@ -52,10 +52,16 @@ pub fn run() {
         let _ = net::discovery::run(d_cfg, m, t, Arc::new(|_| {}), s).await;
     });
 
+    let friends_manager = Arc::new(
+        net::friends::FriendsManager::load_or_create()
+            .expect("falha ao inicializar gerenciador de identidade e amigos"),
+    );
+
     let app_state = AppState {
         local_peer,
         peer_table,
         control_server,
+        friends_manager,
         active_sender: Mutex::new(None),
         active_receivers: Mutex::new(std::collections::HashMap::new()),
         shutdown_discovery,
@@ -79,6 +85,12 @@ pub fn run() {
             get_stream_stats,
             get_room_ticket,
             request_stream_keyframe,
+            list_friends,
+            send_friend_request,
+            respond_friend_request,
+            remove_friend,
+            knock_friend_stream,
+            sync_friends_inbox,
             updater::check_for_updates,
             updater::download_and_install_update,
             updater::restart_app,

@@ -1,6 +1,6 @@
 [package]
 name = "luke-share"
-version = "0.3.11"
+version = "0.4.0"
 edition = "2021"
 default-run = "luke-share"
 description = "Screenshare P2P de ultra-baixa latência nativo sobre a Internet"
@@ -37,6 +37,7 @@ rand = "0.10.3"
 sha2 = "0.11.1"
 hmac = "0.13.0"
 hex = "0.4.3"
+ed25519-dalek = { version = "3.0.0", features = ["rand_core"] }
 
 [dependencies.windows]
 version = "0.62"
