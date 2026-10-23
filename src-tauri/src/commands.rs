@@ -13,7 +13,6 @@ use uuid::Uuid;
 
 use crate::capture::sources::{list_sources, SourceInfo};
 use crate::net::discovery::{LocalPeer, PeerInfo, PeerTable};
-use crate::net::friends::{Friend, FriendsManager};
 use crate::net::p2p::{create_endpoint, RoomTicket};
 use crate::net::protocol::{AudioOffer, PeerStatus, VideoOffer, CONTROL_PORT};
 use crate::net::session::ControlServer;
@@ -26,7 +25,6 @@ pub struct AppState {
     pub local_peer: Arc<LocalPeer>,
     pub peer_table: Arc<PeerTable>,
     pub control_server: Arc<ControlServer>,
-    pub friends_manager: Arc<FriendsManager>,
     pub active_sender: Mutex<Option<SenderPipeline>>,
     pub active_receivers: Mutex<std::collections::HashMap<String, ReceiverPipeline>>,
     pub shutdown_discovery: Arc<Notify>,
@@ -49,7 +47,6 @@ fn update_local_status(state: &AppState) {
 pub struct MyInfo {
     pub id: Uuid,
     pub nick: String,
-    pub tag: String,
     pub status: PeerStatus,
     pub ip: Option<String>,
     pub adapter_name: Option<String>,
@@ -70,7 +67,6 @@ pub fn get_my_info(state: State<'_, AppState>) -> Result<MyInfo, String> {
     Ok(MyInfo {
         id: state.local_peer.id,
         nick: state.local_peer.nick(),
-        tag: state.friends_manager.tag.clone(),
         status: state.local_peer.status(),
         ip: Some("P2P Nativo Iroh".into()),
         adapter_name: Some("Internet Direta (Sem VPN)".into()),
@@ -122,7 +118,7 @@ pub fn list_peers(state: State<'_, AppState>) -> Result<Vec<PeerInfo>, String> {
 
 #[tauri::command]
 pub fn add_manual_peer(state: State<'_, AppState>, ip: String) -> Result<(), String> {
-    let ipv4 = Ipv4Addr::from_str(ip.trim()).map_err(|e| format!("IP invÃ¡lido: {e}"))?;
+    let ipv4 = Ipv4Addr::from_str(ip.trim()).map_err(|e| format!("IP inválido: {e}"))?;
     state.peer_table.add_manual(ipv4);
     Ok(())
 }
@@ -183,7 +179,7 @@ pub async fn start_share(
     let source = sources
         .into_iter()
         .find(|s| s.id() == source_id)
-        .ok_or_else(|| "Fonte de captura nÃ£o encontrada".to_string())?;
+        .ok_or_else(|| "Fonte de captura não encontrada".to_string())?;
 
     let preset = match preset_str.to_lowercase().as_str() {
         "source" => Preset::Source,
@@ -192,11 +188,11 @@ pub async fn start_share(
         _ => Preset::P1080,
     };
 
-    // Seamless Switch: Se jÃ¡ houver um Sender ativo, alternamos a fonte sem reiniciar a sala
+    // Seamless Switch: Se já houver um Sender ativo, alternamos a fonte sem reiniciar a sala
     {
         let mut active_lock = state.active_sender.lock();
         if let Some(ref mut sender) = *active_lock {
-            tracing::info!("commands: Alternando fonte de transmissÃ£o no Sender ativo (Seamless Switch)");
+            tracing::info!("commands: Alternando fonte de transmissão no Sender ativo (Seamless Switch)");
             sender
                 .switch_source(
                     source,
@@ -206,7 +202,7 @@ pub async fn start_share(
                     codec,
                     audio_muted,
                 )
-                .map_err(|e| format!("Erro ao alternar fonte de transmissÃ£o: {e:#}"))?;
+                .map_err(|e| format!("Erro ao alternar fonte de transmissão: {e:#}"))?;
 
             let out_res = sender.out_resolution;
             let active_fps = sender.active_fps;
@@ -308,7 +304,7 @@ pub async fn start_share(
         .await
         .map_err(|e| format!("Erro iniciando servidor de controle TCP: {e:#}"))?;
 
-    // Envia evento de configuraÃ§Ã£o inicial para a prÃ©via local
+    // Envia evento de configuração inicial para a prévia local
     let _ = on_preview.send(StreamEvent::Config {
         width: out_res.0,
         height: out_res.1,
@@ -316,7 +312,7 @@ pub async fn start_share(
         codec: active_codec.clone(),
     });
 
-    // Solicita keyframe IDR imediato para que a prÃ©via e espectadores iniciem sem atraso
+    // Solicita keyframe IDR imediato para que a prévia e espectadores iniciem sem atraso
     sender.request_keyframe();
 
     *state.active_sender.lock() = Some(sender);
@@ -363,7 +359,7 @@ pub async fn watch_peer(
     peer_ip: String,
     on_event: Channel<StreamEvent>,
 ) -> Result<(), String> {
-    // Se jÃ¡ houver um receiver com esse stream_id, encerra ele primeiro
+    // Se já houver um receiver com esse stream_id, encerra ele primeiro
     let prev_opt = {
         let mut cur = state.active_receivers.lock();
         cur.remove(&stream_id)
@@ -377,7 +373,7 @@ pub async fn watch_peer(
         let _ = on_event.send(ev);
     });
 
-    // 1. ConexÃ£o P2P Nativa sobre Iroh (quando fornecido Ticket lk-...)
+    // 1. Conexão P2P Nativa sobre Iroh (quando fornecido Ticket lk-...)
     if trimmed.starts_with("lk-") {
         let ticket = RoomTicket {
             raw: trimmed.to_string(),
@@ -401,8 +397,8 @@ pub async fn watch_peer(
         return Ok(());
     }
 
-    // 2. ConexÃ£o direta por IP (LAN)
-    let remote_ip = Ipv4Addr::from_str(trimmed).map_err(|e| format!("EndereÃ§o IP ou Ticket de sala invÃ¡lido: {e}"))?;
+    // 2. Conexão direta por IP (LAN)
+    let remote_ip = Ipv4Addr::from_str(trimmed).map_err(|e| format!("Endereço IP ou Ticket de sala inválido: {e}"))?;
     let bind_ip = Ipv4Addr::UNSPECIFIED;
 
     let receiver = ReceiverPipeline::start(
@@ -414,7 +410,7 @@ pub async fn watch_peer(
         event_sink,
     )
     .await
-    .map_err(|e| format!("Falha ao conectar com o anfitriÃ£o: {e:#}"))?;
+    .map_err(|e| format!("Falha ao conectar com o anfitrião: {e:#}"))?;
 
     state.active_receivers.lock().insert(stream_id, receiver);
     update_local_status(&state);
@@ -459,121 +455,4 @@ pub fn request_stream_keyframe(
         }
     }
     Ok(())
-}
-
-// --- Comandos de Amizades e Solicitações ---
-
-#[tauri::command]
-pub fn list_friends(state: State<'_, AppState>) -> Result<Vec<Friend>, String> {
-    Ok(state.friends_manager.list_friends())
-}
-
-#[tauri::command]
-pub async fn send_friend_request(
-    state: State<'_, AppState>,
-    target_tag: String,
-) -> Result<String, String> {
-    let my_nick = state.local_peer.nick();
-    let envelope = state
-        .friends_manager
-        .add_or_request_friend(&target_tag, &my_nick)
-        .map_err(|e| e.to_string())?;
-
-    FriendsManager::send_envelope_to_cloud(&envelope)
-        .await
-        .map_err(|e| format!("Falha ao enviar solicitação na nuvem: {e:#}"))?;
-
-    Ok("Solicitação de amizade enviada com sucesso!".into())
-}
-
-#[tauri::command]
-pub async fn respond_friend_request(
-    state: State<'_, AppState>,
-    friend_tag: String,
-    accept: bool,
-) -> Result<(), String> {
-    let my_nick = state.local_peer.nick();
-    if accept {
-        let envelope = state
-            .friends_manager
-            .accept_friend(&friend_tag, &my_nick)
-            .map_err(|e| e.to_string())?;
-        let _ = FriendsManager::send_envelope_to_cloud(&envelope).await;
-    } else {
-        let envelope = state
-            .friends_manager
-            .reject_friend(&friend_tag, &my_nick)
-            .map_err(|e| e.to_string())?;
-        let _ = FriendsManager::send_envelope_to_cloud(&envelope).await;
-    }
-    Ok(())
-}
-
-#[tauri::command]
-pub fn remove_friend(state: State<'_, AppState>, friend_tag: String) -> Result<(), String> {
-    state
-        .friends_manager
-        .remove_friend(&friend_tag)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn knock_friend_stream(
-    state: State<'_, AppState>,
-    friend_tag: String,
-) -> Result<String, String> {
-    let my_nick = state.local_peer.nick();
-    let envelope = state
-        .friends_manager
-        .sign_envelope(&friend_tag, &my_nick, "knock", None)
-        .map_err(|e| e.to_string())?;
-
-    FriendsManager::send_envelope_to_cloud(&envelope)
-        .await
-        .map_err(|e| format!("Falha ao pedir para entrar: {e:#}"))?;
-
-    Ok("Pedido para entrar na transmissão enviado ao amigo!".into())
-}
-
-#[tauri::command]
-pub async fn sync_friends_inbox(state: State<'_, AppState>) -> Result<Vec<String>, String> {
-    let envelopes = state
-        .friends_manager
-        .poll_inbox_from_cloud()
-        .await
-        .unwrap_or_default();
-
-    let mut notifications = Vec::new();
-    for env in envelopes {
-        if let Ok(Some(notif)) = state.friends_manager.verify_and_process_envelope(&env) {
-            notifications.push(notif);
-        }
-    }
-
-    // Se o host estiver transmitindo, faz broadcast do room_ticket para os amigos aceitos
-    let room_ticket = state
-        .active_sender
-        .lock()
-        .as_ref()
-        .and_then(|s| s.room_ticket.as_ref().map(|t| t.raw.clone()));
-
-    let my_nick = state.local_peer.nick();
-    let accepted_friends: Vec<String> = state
-        .friends_manager
-        .list_friends()
-        .into_iter()
-        .filter(|f| f.status == crate::net::friends::FriendStatus::Accepted)
-        .map(|f| f.tag)
-        .collect();
-
-    for f_tag in accepted_friends {
-        if let Ok(env) = state
-            .friends_manager
-            .sign_envelope(&f_tag, &my_nick, "presence", room_ticket.clone())
-        {
-            let _ = FriendsManager::send_envelope_to_cloud(&env).await;
-        }
-    }
-
-    Ok(notifications)
 }

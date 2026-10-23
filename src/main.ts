@@ -8,7 +8,6 @@ import { UpdaterManager } from "./ui/updater";
 interface MyInfo {
   id: string;
   nick: string;
-  tag?: string;
   status: "Idle" | "Streaming" | "Watching";
   ip: string | null;
   adapter_name: string | null;
@@ -124,20 +123,6 @@ class App {
     }
 
     this.nickInput.value = this.myInfo.nick;
-
-    const myTagText = document.getElementById("my-tag-text");
-    if (myTagText && this.myInfo.tag) {
-      myTagText.textContent = this.myInfo.tag;
-    }
-
-    const myTagPill = document.getElementById("my-tag-pill");
-    if (myTagPill && this.myInfo.tag) {
-      myTagPill.onclick = () => {
-        navigator.clipboard.writeText(this.myInfo!.tag!);
-        this.showToast(`Tag ${this.myInfo!.tag} copiada para a área de transferência!`, "content_copy");
-      };
-    }
-
     this.updateStatusPill();
   }
 
@@ -179,8 +164,7 @@ class App {
       peersCountBadge,
       manualIpInput,
       btnAddManual,
-      (ip, nick) => this.startWatchingPeer(ip, nick),
-      (msg, icon) => this.showToast(msg, icon || "check_circle")
+      (ip, nick) => this.startWatchingPeer(ip, nick)
     );
   }
 
@@ -468,7 +452,7 @@ class App {
       return;
     }
 
-    const isTicket = streamId.toLowerCase().startsWith("lk-");
+    const isTicket = streamId.startsWith("lk-");
     const displayHost = isTicket ? `Amigo (${nick === "Sala P2P" ? "P2P" : nick})` : nick;
     const displayAddr = isTicket ? "P2P Internet" : streamId;
 
