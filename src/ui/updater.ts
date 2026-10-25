@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getVersion } from "@tauri-apps/api/app";
 
 export interface UpdateInfo {
   available: boolean;
@@ -23,6 +24,7 @@ export class UpdaterManager {
 
   constructor() {
     this.initDOMElements();
+    this.syncHeaderVersion();
     this.bindEvents();
     this.listenToProgressEvents();
 
@@ -32,6 +34,16 @@ export class UpdaterManager {
         console.debug("Verificação automática de update (esperado caso offline):", e);
       });
     }, 3500);
+  }
+
+  private async syncHeaderVersion() {
+    try {
+      const ver = await getVersion();
+      const tag = document.getElementById("header-version-tag");
+      if (tag && ver) {
+        tag.textContent = `v${ver}`;
+      }
+    } catch (_) {}
   }
 
   private initDOMElements() {

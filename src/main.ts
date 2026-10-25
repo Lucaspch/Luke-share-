@@ -1,6 +1,5 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
-import { PeersManager } from "./ui/peers";
 import { ShareManager } from "./ui/share";
 import { StreamPlayer, StreamEvent } from "./media/player";
 import { UpdaterManager } from "./ui/updater";
@@ -9,8 +8,6 @@ interface MyInfo {
   id: string;
   nick: string;
   status: "Idle" | "Streaming" | "Watching";
-  ip: string | null;
-  adapter_name: string | null;
 }
 
 interface ActiveStream {
@@ -25,7 +22,6 @@ interface ActiveStream {
 }
 
 class App {
-  private peersManager!: PeersManager;
   private shareManager!: ShareManager;
   private updaterManager!: UpdaterManager;
   private myInfo: MyInfo | null = null;
@@ -114,13 +110,8 @@ class App {
   private updateMyInfoUI() {
     if (!this.myInfo) return;
 
-    if (this.myInfo.ip) {
-      this.myIpEl.textContent = `${this.myInfo.ip} • P2P`;
-      this.myIpEl.title = `Rede Local (${this.myInfo.ip}) + Iroh P2P Nativo`;
-    } else {
-      this.myIpEl.textContent = "P2P Nativo Pronto";
-      this.myIpEl.title = "Iroh P2P Nativo (Internet Direta sem VPN)";
-    }
+    this.myIpEl.textContent = "P2P Nativo Pronto";
+    this.myIpEl.title = "Iroh P2P Nativo (Internet Direta)";
 
     this.nickInput.value = this.myInfo.nick;
     this.updateStatusPill();
@@ -154,18 +145,24 @@ class App {
   }
 
   private initPeers() {
-    const peersContainer = document.getElementById("peers-list") as HTMLElement;
-    const peersCountBadge = document.getElementById("peers-count") as HTMLElement;
     const manualIpInput = document.getElementById("manual-ip-input") as HTMLInputElement;
     const btnAddManual = document.getElementById("btn-add-manual") as HTMLButtonElement;
 
-    this.peersManager = new PeersManager(
-      peersContainer,
-      peersCountBadge,
-      manualIpInput,
-      btnAddManual,
-      (ip, nick) => this.startWatchingPeer(ip, nick)
-    );
+    const handleConnectRoom = () => {
+      const val = manualIpInput.value.trim();
+      if (!val) return;
+      if (!val.startsWith("lk-")) {
+        this.showToast("Código inválido. Cole um código de sala começando com lk-...", "error");
+        return;
+      }
+      manualIpInput.value = "";
+      this.startWatchingPeer(val, "Sala P2P");
+    };
+
+    btnAddManual.addEventListener("click", handleConnectRoom);
+    manualIpInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") handleConnectRoom();
+    });
   }
 
   private initShare() {
@@ -452,9 +449,8 @@ class App {
       return;
     }
 
-    const isTicket = streamId.startsWith("lk-");
-    const displayHost = isTicket ? `Amigo (${nick === "Sala P2P" ? "P2P" : nick})` : nick;
-    const displayAddr = isTicket ? "P2P Internet" : streamId;
+    const displayHost = nick === "Sala P2P" ? "Amigo (P2P)" : nick;
+    const displayAddr = "P2P Internet";
 
     this.sharePanel.classList.add("hidden");
     this.watchPanel.classList.remove("hidden");

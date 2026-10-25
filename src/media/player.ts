@@ -31,6 +31,8 @@ export class StreamPlayer {
   private audioCtx: AudioContext | null = null;
   private gainNode: GainNode | null = null;
   private nextAudioPlayTime = 0;
+  private audioTargetLeadSec = 0.045;
+  private lastUnderrunTime = 0;
   private overlay: HTMLElement | null;
   private statsCallback?: (stats: PlayerStats) => void;
   private onRequestKey?: () => void;
@@ -262,11 +264,12 @@ export class StreamPlayer {
       if (!this.videoDecoder || this.videoDecoder.state !== "configured") return;
     }
 
-    // Se o decoder acumular mais de 8 frames na fila (lag severo de renderização/GPU):
+    // Se o decoder acumular mais de 36 frames na fila (travamento real de GPU/aba em background,
+    // acima de rajadas normais de destravamento NACK em 60-240 FPS):
     // Limpa a fila inteira com reset(), descarta até o próximo IDR e dispara pedido imediato de PLI ao host.
     // NUNCA descarte um P-frame isolado, pois quebra toda a predição temporal H.264 subsequente!
-    if (this.videoDecoder.decodeQueueSize > 8) {
-      console.warn("VideoDecoder decodeQueueSize > 8; resetando fila e solicitando IDR imediato...");
+    if (this.videoDecoder.decodeQueueSize > 36) {
+      console.warn("VideoDecoder decodeQueueSize > 36; resetando fila e solicitando IDR imediato...");
       try {
         this.videoDecoder.reset();
         this.configureDecoder();
@@ -334,20 +337,49 @@ export class StreamPlayer {
         right[i] = floats[i * 2 + 1];
       }
 
-      const src = this.audioCtx.createBufferSource();
-      src.buffer = buffer;
-      src.connect(this.gainNode);
-
       const curTime = this.audioCtx.currentTime;
-      if (this.nextAudioPlayTime < curTime) {
-        this.nextAudioPlayTime = curTime;
-      } else if (this.nextAudioPlayTime > curTime + 0.08) {
-        // Limita o atraso máximo acumulado de áudio a 40ms para evitar descompasso
-        this.nextAudioPlayTime = curTime + 0.04;
+      const lead = this.nextAudioPlayTime - curTime;
+      let playbackRate = 1.0;
+      let applyMicroFade = false;
+
+      if (lead < 0) {
+        if (this.nextAudioPlayTime > 0) {
+          applyMicroFade = true;
+          if (curTime - this.lastUnderrunTime < 4.0) {
+            // Rede instável: amplia suavemente o colchão de jitter até 85ms
+            this.audioTargetLeadSec = Math.min(0.085, this.audioTargetLeadSec + 0.01);
+          }
+          this.lastUnderrunTime = curTime;
+        }
+        this.nextAudioPlayTime = curTime + this.audioTargetLeadSec;
+      } else if (lead > 0.28) {
+        // Apenas em rajadas extremas (>280ms acumulados) realinha o buffer com fade suave
+        applyMicroFade = true;
+        this.nextAudioPlayTime = curTime + this.audioTargetLeadSec;
+      } else if (lead > this.audioTargetLeadSec + 0.075) {
+        // Aceleração imperceptível (3%) para drenar atraso acumulado sem picotar ou sobrepor áudio
+        playbackRate = 1.03;
+      } else if (curTime - this.lastUnderrunTime > 8.0 && this.audioTargetLeadSec > 0.045) {
+        // Rede estável há mais de 8s: reduz gradualmente o colchão de volta para 45ms
+        this.audioTargetLeadSec = Math.max(0.045, this.audioTargetLeadSec - 0.0005);
       }
 
+      if (applyMicroFade) {
+        const fadeSamples = Math.min(96, numSamples); // ~2ms @ 48kHz evita estalos secos na retomada
+        for (let i = 0; i < fadeSamples; i++) {
+          const g = i / fadeSamples;
+          left[i] *= g;
+          right[i] *= g;
+        }
+      }
+
+      const src = this.audioCtx.createBufferSource();
+      src.buffer = buffer;
+      src.playbackRate.value = playbackRate;
+      src.connect(this.gainNode);
+
       src.start(this.nextAudioPlayTime);
-      this.nextAudioPlayTime += buffer.duration;
+      this.nextAudioPlayTime += buffer.duration / playbackRate;
     } catch (e) {
       console.warn("Erro reproduzindo áudio PCM:", e);
     }

@@ -27,6 +27,7 @@ pub fn packetize(kind: u8, frame_id: u32, key: bool, ts_90k: u32, data: &[u8]) -
 }
 
 pub const DEFAULT_FEC_BLOCK_SIZE: usize = 8;
+pub const KEYFRAME_FEC_BLOCK_SIZE: usize = 4;
 pub const FEC_HEADER_BYTES: usize = 8; // start_idx (2B) + count (2B) + total_video_frags (2B) + last_frag_len (2B)
 
 /// Gera pacotes FEC de paridade XOR para os fragmentos de vídeo de um frame.
@@ -119,8 +120,8 @@ impl RetransmitRing {
     }
 }
 
-/// Controlador de Congestionamento Adaptativo (AIMD) para taxa de bits do encoder.
-/// Reduz multiplicativamente sob congestionamento (perda > 2.5% ou RTT alto)
+/// Controlador de Congestionamento Adaptativo (AIMD) para taxa de bits e nível de FEC do encoder.
+/// Reduz multiplicativamente sob congestionamento (perda > 2.0% ou RTT alto)
 /// e aumenta aditivamente quando o canal está estável.
 #[derive(Debug, Clone)]
 pub struct CongestionController {
@@ -129,6 +130,8 @@ pub struct CongestionController {
     current_bitrate: u32,
     clean_ticks: u32,
     last_decrease: Option<Instant>,
+    loss_ewma: f32,
+    rtt_ewma: u32,
 }
 
 impl CongestionController {
@@ -139,6 +142,8 @@ impl CongestionController {
             current_bitrate: initial_bitrate.clamp(min_bitrate, max_bitrate),
             clean_ticks: 0,
             last_decrease: None,
+            loss_ewma: 0.0,
+            rtt_ewma: 0,
         }
     }
 
@@ -146,9 +151,23 @@ impl CongestionController {
         self.current_bitrate
     }
 
+    /// Retorna o tamanho ideal do bloco FEC (menor = proteção mais forte).
+    /// Keyframes e redes com perda recente recebem paridade reforçada para evitar loops de congelamento.
+    pub fn recommended_fec_block_size(&self, is_key: bool) -> usize {
+        if self.loss_ewma > 4.0 {
+            if is_key { 2 } else { 3 } // 50% FEC em Keyframe / 33% em P-frame sob perda severa
+        } else if self.loss_ewma > 1.0 {
+            if is_key { 3 } else { 4 } // 33% FEC em Keyframe / 25% em P-frame sob perda moderada
+        } else if is_key {
+            KEYFRAME_FEC_BLOCK_SIZE // 25% FEC em todo Keyframe para blindar entrada e retomada
+        } else {
+            DEFAULT_FEC_BLOCK_SIZE // 12.5% FEC em canal limpo
+        }
+    }
+
     pub fn set_max_bitrate(&mut self, max: u32) {
         self.max_bitrate = max;
-        self.min_bitrate = (max / 3).max(3_000_000).min(max);
+        self.min_bitrate = (max / 6).clamp(1_200_000, 2_500_000).min(max);
         if self.current_bitrate > self.max_bitrate {
             self.current_bitrate = self.max_bitrate;
         } else if self.current_bitrate < self.min_bitrate {
@@ -161,16 +180,35 @@ impl CongestionController {
     pub fn on_telemetry(&mut self, rtt_ms: u32, loss_pct: f32) -> Option<u32> {
         let now = Instant::now();
 
-        // Condição de congestionamento: Perda > 2.5% ou RTT severo (> 250ms)
-        if loss_pct > 2.5 || rtt_ms > 250 {
+        self.loss_ewma = if self.loss_ewma == 0.0 {
+            loss_pct
+        } else {
+            self.loss_ewma * 0.6 + loss_pct * 0.4
+        };
+        if rtt_ms > 0 {
+            self.rtt_ewma = if self.rtt_ewma == 0 {
+                rtt_ms
+            } else {
+                (self.rtt_ewma * 3 + rtt_ms) / 4
+            };
+        }
+
+        // Condição de congestionamento: Perda > 2.0% ou RTT severo (> 230ms)
+        if loss_pct > 2.0 || rtt_ms > 230 {
             if let Some(last) = self.last_decrease {
-                if now.duration_since(last) < Duration::from_millis(1500) {
+                if now.duration_since(last) < Duration::from_millis(850) {
                     return None;
                 }
             }
 
-            // Redução Multiplicativa (AIMD): 15% a 25% dependendo da gravidade
-            let factor = if loss_pct > 8.0 { 0.75 } else { 0.85 };
+            // Redução Multiplicativa (AIMD): 15%, 25% ou 35% dependendo da gravidade
+            let factor = if loss_pct > 12.0 {
+                0.65
+            } else if loss_pct > 8.0 {
+                0.75
+            } else {
+                0.85
+            };
             let new_br = ((self.current_bitrate as f32 * factor) as u32).max(self.min_bitrate);
 
             self.clean_ticks = 0;
@@ -185,11 +223,17 @@ impl CongestionController {
                 return Some(new_br);
             }
         } else if loss_pct <= 0.8 && rtt_ms <= 180 {
-            // Canal limpo: após 2 relatórios consecutivos (~3 a 4 segundos), aplica Aumento Aditivo
+            // Protege contra aumento prematuro caso outro espectador tenha reportado perda recentemente
+            if let Some(last) = self.last_decrease {
+                if now.duration_since(last) < Duration::from_millis(2200) {
+                    return None;
+                }
+            }
+            // Canal limpo: após 2 relatórios consecutivos, aplica Aumento Aditivo
             self.clean_ticks += 1;
             if self.clean_ticks >= 2 && self.current_bitrate < self.max_bitrate {
                 self.clean_ticks = 0;
-                let step = (self.max_bitrate / 15).max(800_000); // recuperação ágil em redes saudáveis (+800kbps a +1.5Mbps)
+                let step = (self.max_bitrate / 15).max(800_000);
                 let new_br = (self.current_bitrate + step).min(self.max_bitrate);
                 if new_br != self.current_bitrate {
                     tracing::info!(
@@ -201,7 +245,7 @@ impl CongestionController {
                 }
             }
         } else {
-            // Zona neutra (0.8% a 2.5%): mantém taxa atual para evitar oscilações
+            // Zona neutra (0.8% a 2.0%): mantém taxa atual para evitar oscilações
             self.clean_ticks = 0;
         }
 
@@ -309,8 +353,8 @@ impl Partial {
 
 pub const NACK_AFTER_MS: u64 = 4;
 pub const NACK_RETRY_MS: u64 = 15;
-pub const GIVE_UP_DELTA_MS: u64 = 90;
-pub const GIVE_UP_KEY_MS: u64 = 140;
+pub const GIVE_UP_DELTA_MS: u64 = 160;
+pub const GIVE_UP_KEY_MS: u64 = 280;
 pub const PLI_INTERVAL_MS: u64 = 250;
 
 pub struct Reassembler {
@@ -373,6 +417,57 @@ impl Reassembler {
 
     pub fn waiting_for_key(&self) -> bool {
         self.need_key
+    }
+
+    /// Atualiza a estimativa de RTT a partir da conexão QUIC subjacente, permitindo
+    /// ajustar prazos de NACK e Give-Up mesmo antes da primeira perda de pacote.
+    pub fn set_link_rtt_ms(&mut self, quic_rtt_ms: u32) {
+        if quic_rtt_ms > 0 && quic_rtt_ms < 3000 {
+            if self.rtt_ms == 0 {
+                self.rtt_ms = quic_rtt_ms;
+            } else {
+                self.rtt_ms = (self.rtt_ms * 3 + quic_rtt_ms) / 4;
+            }
+        }
+    }
+
+    fn effective_nack_after_ms(&self) -> u64 {
+        if self.rtt_ms == 0 {
+            NACK_AFTER_MS
+        } else {
+            ((self.rtt_ms as u64) / 6).clamp(4, 16)
+        }
+    }
+
+    fn effective_nack_retry_ms(&self) -> u64 {
+        if self.rtt_ms == 0 {
+            NACK_RETRY_MS
+        } else {
+            ((self.rtt_ms as u64) + 12).clamp(20, 220)
+        }
+    }
+
+    fn effective_give_up_ms(&self, is_key: bool) -> u64 {
+        let rtt = self.rtt_ms as u64;
+        if is_key {
+            if rtt == 0 {
+                GIVE_UP_KEY_MS
+            } else {
+                (rtt * 3 + 140).clamp(GIVE_UP_KEY_MS, 900)
+            }
+        } else if rtt == 0 {
+            GIVE_UP_DELTA_MS
+        } else {
+            (rtt * 2 + 80).clamp(GIVE_UP_DELTA_MS, 550)
+        }
+    }
+
+    fn effective_pli_interval_ms(&self) -> u64 {
+        if self.rtt_ms == 0 {
+            PLI_INTERVAL_MS
+        } else {
+            ((self.rtt_ms as u64) * 2 + 150).clamp(PLI_INTERVAL_MS, 750)
+        }
     }
 
     pub fn push(&mut self, h: &MediaHeader, payload: &[u8], now_ms: u64) -> Vec<RxEvent> {
@@ -486,6 +581,29 @@ impl Reassembler {
             }
         }
         let mut next = self.next_id.unwrap();
+
+        // Fast-forward: se estamos travados num frame incompleto, mas um Keyframe (IDR) mais recente
+        // JÁ chegou 100% completo na fila, pula direto para ele sem congelar esperando timeout!
+        if !self.frames.get(&next).is_some_and(|p| p.complete()) {
+            let newer_complete_key = self
+                .frames
+                .iter()
+                .find(|(fid, p)| (fid.wrapping_sub(next) as i32) > 0 && p.key && p.complete())
+                .map(|(fid, _)| *fid);
+
+            if let Some(kf_id) = newer_complete_key {
+                for (&fid, p) in &self.frames {
+                    if (fid.wrapping_sub(kf_id) as i32) < 0 {
+                        self.packets_lost += p.missing().len() as u64;
+                        self.dropped_frames += 1;
+                    }
+                }
+                self.frames.retain(|fid, _| (fid.wrapping_sub(kf_id) as i32) >= 0);
+                next = kf_id;
+                self.stall_since = None;
+            }
+        }
+
         while self.frames.get(&next).is_some_and(|p| p.complete()) {
             let p = self.frames.remove(&next).unwrap();
             let mut data = Vec::new();
@@ -503,11 +621,12 @@ impl Reassembler {
         }
     }
 
-    /// Deve ser chamado periodicamente (~4 ms). Gera NACKs e pedidos de keyframe.
+    /// Deve ser chamado periodicamente (~4 ms). Gera NACKs e pedidos de keyframe adaptados ao RTT.
     pub fn tick(&mut self, now_ms: u64) -> Vec<RxEvent> {
         let mut ev = Vec::new();
+        let pli_interval = self.effective_pli_interval_ms();
         if self.need_key {
-            if self.last_pli.is_none_or(|t| now_ms.saturating_sub(t) >= PLI_INTERVAL_MS) {
+            if self.last_pli.is_none_or(|t| now_ms.saturating_sub(t) >= pli_interval) {
                 self.last_pli = Some(now_ms);
                 ev.push(RxEvent::RequestKey);
             }
@@ -519,8 +638,8 @@ impl Reassembler {
             self.stall_since = None;
             return ev;
         }
-        let is_key = self.frames.get(&next).map_or(false, |p| p.key);
-        let timeout = if is_key { GIVE_UP_KEY_MS } else { GIVE_UP_DELTA_MS };
+        let is_key = self.frames.get(&next).is_some_and(|p| p.key);
+        let timeout = self.effective_give_up_ms(is_key);
         let age = now_ms.saturating_sub(since);
 
         if age >= timeout {
@@ -541,7 +660,7 @@ impl Reassembler {
             self.need_key = true;
             self.next_id = None;
             self.stall_since = None;
-            if self.last_pli.is_none_or(|t| now_ms.saturating_sub(t) >= PLI_INTERVAL_MS) {
+            if self.last_pli.is_none_or(|t| now_ms.saturating_sub(t) >= pli_interval) {
                 self.last_pli = Some(now_ms);
                 ev.push(RxEvent::RequestKey);
             }
@@ -549,10 +668,13 @@ impl Reassembler {
             self.drain(now_ms, &mut ev);
             return ev;
         }
-        if age >= NACK_AFTER_MS {
+
+        let nack_after = self.effective_nack_after_ms();
+        let nack_retry = self.effective_nack_retry_ms();
+        if age >= nack_after {
             match self.frames.get_mut(&next) {
                 Some(p) => {
-                    if p.nacks < 3 && (p.nacks == 0 || now_ms.saturating_sub(p.last_nack) >= NACK_RETRY_MS) {
+                    if p.nacks < 4 && (p.nacks == 0 || now_ms.saturating_sub(p.last_nack) >= nack_retry) {
                         p.nacks += 1;
                         p.last_nack = now_ms;
                         let missing = p.missing();
@@ -563,7 +685,7 @@ impl Reassembler {
                 None => {
                     // nenhum fragmento do frame chegou: pede o fragmento 0 para descobrir `frag_cnt`
                     let last = self.last_nack_empty.unwrap_or(0);
-                    if last == 0 || now_ms.saturating_sub(last) >= NACK_RETRY_MS {
+                    if last == 0 || now_ms.saturating_sub(last) >= nack_retry {
                         self.last_nack_empty = Some(now_ms);
                         self.nacks_sent += 1;
                         ev.push(RxEvent::Nack { frame_id: next, missing: vec![0] });
@@ -741,5 +863,61 @@ mod tests {
         let increased = cc_stable.on_telemetry(25, 0.0);   // tick 2 -> +800 kbps
         assert_eq!(increased, Some(4_800_000));
         assert_eq!(cc_stable.current_bitrate(), 4_800_000);
+    }
+
+    #[test]
+    fn high_rtt_link_recovers_nack_without_freezing() {
+        let mut r = Reassembler::new();
+        r.set_link_rtt_ms(110); // Simula conexão Internet / Relay com 110ms de ping
+        let mut ring = RetransmitRing::new(128);
+
+        let d0 = data(200, 1);
+        let d1 = data(3500, 2);
+        assert_eq!(feed(&mut r, &packetize(KIND_VIDEO, 1, true, 0, &d0), 0).len(), 1);
+
+        let p1 = packetize(KIND_VIDEO, 2, false, 90, &d1);
+        for (i, p) in p1.iter().enumerate() {
+            ring.push(2, i as u16, p.clone());
+        }
+        let lossy: Vec<_> = p1.iter().enumerate().filter(|(i, _)| *i != 1).map(|(_, p)| p.clone()).collect();
+        assert!(feed(&mut r, &lossy, 5).is_empty());
+
+        // T=25ms: dispara exatamente 1 NACK
+        let ev1 = r.tick(25);
+        assert_eq!(ev1, vec![RxEvent::Nack { frame_id: 2, missing: vec![1] }]);
+
+        // T=100ms (antes a versão antiga já teria desistido em 90ms e congelado a tela!):
+        // Agora respeita o RTT de 110ms e nem sequer envia retry duplicado ainda!
+        assert!(r.tick(100).is_empty());
+        assert!(!r.waiting_for_key());
+
+        // T=135ms: pacote retransmitido chega após 1 RTT completo e destrava o vídeo liso!
+        let re = ring.get(2, 1).unwrap();
+        let out = feed(&mut r, &[(*re).clone()], 135);
+        assert_eq!(out.len(), 1);
+        assert!(!r.waiting_for_key());
+    }
+
+    #[test]
+    fn stalled_delta_fast_forwards_when_newer_keyframe_arrives() {
+        let mut r = Reassembler::new();
+        assert_eq!(feed(&mut r, &packetize(KIND_VIDEO, 1, true, 0, &data(200, 1)), 0).len(), 1);
+
+        // Frame 2 (P-frame) perde um fragmento e fica travado
+        let p2 = packetize(KIND_VIDEO, 2, false, 90, &data(3000, 2));
+        assert!(feed(&mut r, &p2[1..], 5).is_empty());
+
+        // Frame 3 (novo Keyframe IDR) chega completo: deve pular o frame 2 instantaneamente!
+        let d3 = data(500, 9);
+        let out = feed(&mut r, &packetize(KIND_VIDEO, 3, true, 180, &d3), 15);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            RxEvent::Frame { frame_id, key, data, .. } => {
+                assert_eq!(*frame_id, 3);
+                assert!(*key);
+                assert_eq!(data, &d3);
+            }
+            _ => panic!("esperava fast-forward imediato para o Keyframe 3"),
+        }
     }
 }

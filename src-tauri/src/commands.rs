@@ -1,33 +1,57 @@
-//! Comandos Tauri expostos ao frontend.
+//! Comandos Tauri expostos ao frontend (100% P2P Nativo sobre Iroh).
 
-use std::net::Ipv4Addr;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::State;
-use tokio::sync::Notify;
 use uuid::Uuid;
 
 use crate::capture::sources::{list_sources, SourceInfo};
-use crate::net::discovery::{LocalPeer, PeerInfo, PeerTable};
 use crate::net::p2p::{create_endpoint, RoomTicket};
-use crate::net::protocol::{AudioOffer, PeerStatus, VideoOffer, CONTROL_PORT};
-use crate::net::session::ControlServer;
+use crate::net::protocol::PeerStatus;
 use crate::pipeline::receiver::ReceiverPipeline;
 use crate::pipeline::sender::SenderPipeline;
 use crate::pipeline::StreamEvent;
 use crate::video::resolution::Preset;
 
+pub struct LocalIdentity {
+    pub id: Uuid,
+    nick: Mutex<String>,
+    status: Mutex<PeerStatus>,
+}
+
+impl LocalIdentity {
+    pub fn new(nick: String) -> Arc<Self> {
+        Arc::new(Self {
+            id: Uuid::new_v4(),
+            nick: Mutex::new(nick),
+            status: Mutex::new(PeerStatus::Idle),
+        })
+    }
+
+    pub fn nick(&self) -> String {
+        self.nick.lock().clone()
+    }
+
+    pub fn set_nick(&self, n: String) {
+        *self.nick.lock() = n;
+    }
+
+    pub fn status(&self) -> PeerStatus {
+        *self.status.lock()
+    }
+
+    pub fn set_status(&self, s: PeerStatus) {
+        *self.status.lock() = s;
+    }
+}
+
 pub struct AppState {
-    pub local_peer: Arc<LocalPeer>,
-    pub peer_table: Arc<PeerTable>,
-    pub control_server: Arc<ControlServer>,
+    pub local_peer: Arc<LocalIdentity>,
     pub active_sender: Mutex<Option<SenderPipeline>>,
     pub active_receivers: Mutex<std::collections::HashMap<String, ReceiverPipeline>>,
-    pub shutdown_discovery: Arc<Notify>,
 }
 
 fn update_local_status(state: &AppState) {
@@ -48,8 +72,6 @@ pub struct MyInfo {
     pub id: Uuid,
     pub nick: String,
     pub status: PeerStatus,
-    pub ip: Option<String>,
-    pub adapter_name: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -58,7 +80,6 @@ pub struct ShareInfo {
     pub height: u32,
     pub fps: u32,
     pub codec: String,
-    pub media_port: u16,
     pub room_ticket: Option<String>,
 }
 
@@ -68,8 +89,6 @@ pub fn get_my_info(state: State<'_, AppState>) -> Result<MyInfo, String> {
         id: state.local_peer.id,
         nick: state.local_peer.nick(),
         status: state.local_peer.status(),
-        ip: Some("P2P Nativo Iroh".into()),
-        adapter_name: Some("Internet Direta (Sem VPN)".into()),
     })
 }
 
@@ -108,18 +127,6 @@ pub fn set_my_nick(state: State<'_, AppState>, nick: String) -> Result<(), Strin
         state.local_peer.set_nick(trimmed.to_string());
         save_nick(trimmed);
     }
-    Ok(())
-}
-
-#[tauri::command]
-pub fn list_peers(state: State<'_, AppState>) -> Result<Vec<PeerInfo>, String> {
-    Ok(state.peer_table.snapshot())
-}
-
-#[tauri::command]
-pub fn add_manual_peer(state: State<'_, AppState>, ip: String) -> Result<(), String> {
-    let ipv4 = Ipv4Addr::from_str(ip.trim()).map_err(|e| format!("IP inválido: {e}"))?;
-    state.peer_table.add_manual(ipv4);
     Ok(())
 }
 
@@ -188,7 +195,7 @@ pub async fn start_share(
         _ => Preset::P1080,
     };
 
-    // Seamless Switch: Se já houver um Sender ativo, alternamos a fonte sem reiniciar a sala
+    // Seamless Switch: Se já houver um Sender ativo, alternamos a fonte sem reiniciar a sala P2P
     {
         let mut active_lock = state.active_sender.lock();
         if let Some(ref mut sender) = *active_lock {
@@ -207,7 +214,6 @@ pub async fn start_share(
             let out_res = sender.out_resolution;
             let active_fps = sender.active_fps;
             let active_codec = sender.active_codec.as_str().to_string();
-            let media_port = sender.local_media_port;
             let room_ticket = sender.room_ticket.as_ref().map(|t| t.raw.clone());
 
             let _ = on_preview.send(StreamEvent::Config {
@@ -224,15 +230,10 @@ pub async fn start_share(
                 height: out_res.1,
                 fps: active_fps,
                 codec: active_codec,
-                media_port,
                 room_ticket,
             });
         }
     }
-
-    state.control_server.stop();
-
-    let bind_ip = Ipv4Addr::UNSPECIFIED;
 
     let prev_chan = on_preview.clone();
     let preview_sink = Arc::new(move |key: bool, pts: u32, data: Vec<u8>| {
@@ -244,23 +245,17 @@ pub async fn start_share(
         });
     }) as Arc<dyn Fn(bool, u32, Vec<u8>) + Send + Sync>;
 
-    let p2p_endpoint = match create_endpoint().await {
-        Ok(ep) => Some(ep),
-        Err(e) => {
-            tracing::warn!("commands: falha ao inicializar endpoint Iroh P2P: {e:#}");
-            None
-        }
-    };
+    let p2p_endpoint = create_endpoint()
+        .await
+        .map_err(|e| format!("Falha ao inicializar endpoint Iroh P2P: {e:#}"))?;
 
     let sender = SenderPipeline::start(
-        bind_ip,
-        source.clone(),
+        source,
         preset,
         fps_target,
         bitrate_kbps,
         codec,
         audio_muted,
-        state.control_server.clone(),
         Some(preview_sink),
         p2p_endpoint,
     )
@@ -269,40 +264,7 @@ pub async fn start_share(
     let out_res = sender.out_resolution;
     let active_fps = sender.active_fps;
     let active_codec = sender.active_codec.as_str().to_string();
-    let media_port = sender.local_media_port;
     let room_ticket = sender.room_ticket.as_ref().map(|t| t.raw.clone());
-
-    // Inicia servidor de controle TCP no IP do Radmin / LAN para compatibilidade
-    let v_offer = VideoOffer {
-        width: out_res.0,
-        height: out_res.1,
-        fps: active_fps,
-        codec: active_codec.clone(),
-    };
-    let a_offer = Some(AudioOffer {
-        sample_rate: 48000,
-        channels: 2,
-    });
-
-    let key_req = sender.keyframe_requester();
-    let on_watch = Arc::new(move |_id, _nick, _ip, _port| {
-        key_req();
-        true
-    });
-
-    state
-        .control_server
-        .start(
-            bind_ip,
-            CONTROL_PORT,
-            v_offer,
-            a_offer,
-            media_port,
-            on_watch,
-            Arc::new(|_id| {}),
-        )
-        .await
-        .map_err(|e| format!("Erro iniciando servidor de controle TCP: {e:#}"))?;
 
     // Envia evento de configuração inicial para a prévia local
     let _ = on_preview.send(StreamEvent::Config {
@@ -323,7 +285,6 @@ pub async fn start_share(
         height: out_res.1,
         fps: active_fps,
         codec: active_codec,
-        media_port,
         room_ticket,
     })
 }
@@ -333,7 +294,6 @@ pub fn stop_share(state: State<'_, AppState>) -> Result<(), String> {
     if let Some(mut sender) = state.active_sender.lock().take() {
         sender.stop();
     }
-    state.control_server.stop();
     update_local_status(&state);
     Ok(())
 }
@@ -369,48 +329,30 @@ pub async fn watch_peer(
     }
 
     let trimmed = peer_ip.trim();
+    if !trimmed.starts_with("lk-") {
+        return Err("Código de sala inválido. Cole um código P2P válido começando com 'lk-'.".into());
+    }
+
     let event_sink = Arc::new(move |ev: StreamEvent| {
         let _ = on_event.send(ev);
     });
 
-    // 1. Conexão P2P Nativa sobre Iroh (quando fornecido Ticket lk-...)
-    if trimmed.starts_with("lk-") {
-        let ticket = RoomTicket {
-            raw: trimmed.to_string(),
-        };
-        let endpoint = create_endpoint()
-            .await
-            .map_err(|e| format!("Falha ao inicializar P2P Iroh: {e:#}"))?;
-
-        let receiver = ReceiverPipeline::start_p2p(
-            endpoint,
-            ticket,
-            state.local_peer.id,
-            state.local_peer.nick(),
-            event_sink,
-        )
+    let ticket = RoomTicket {
+        raw: trimmed.to_string(),
+    };
+    let endpoint = create_endpoint()
         .await
-        .map_err(|e| format!("Falha ao conectar via P2P Nativo: {e:#}"))?;
+        .map_err(|e| format!("Falha ao inicializar P2P Iroh: {e:#}"))?;
 
-        state.active_receivers.lock().insert(stream_id, receiver);
-        update_local_status(&state);
-        return Ok(());
-    }
-
-    // 2. Conexão direta por IP (LAN)
-    let remote_ip = Ipv4Addr::from_str(trimmed).map_err(|e| format!("Endereço IP ou Ticket de sala inválido: {e}"))?;
-    let bind_ip = Ipv4Addr::UNSPECIFIED;
-
-    let receiver = ReceiverPipeline::start(
-        bind_ip,
-        remote_ip,
-        CONTROL_PORT,
+    let receiver = ReceiverPipeline::start_p2p(
+        endpoint,
+        ticket,
         state.local_peer.id,
         state.local_peer.nick(),
         event_sink,
     )
     .await
-    .map_err(|e| format!("Falha ao conectar com o anfitrião: {e:#}"))?;
+    .map_err(|e| format!("Falha ao conectar via P2P Nativo: {e:#}"))?;
 
     state.active_receivers.lock().insert(stream_id, receiver);
     update_local_status(&state);

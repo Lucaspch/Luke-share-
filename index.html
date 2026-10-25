@@ -28,7 +28,7 @@
           </a>
 
           <div class="header-version-cluster">
-            <span class="version-tag">v0.3.9</span>
+            <span class="version-tag" id="header-version-tag">v0.4.1</span>
             <button id="btn-check-updates" class="btn-check-update" title="Verificar atualizações">
               <span class="material-symbols-rounded ms-sm">sync</span>
               <span>Atualizações</span>
@@ -36,13 +36,13 @@
             </button>
           </div>
 
-          <div class="network-badge" id="network-badge" title="Status da Rede P2P">
+          <div class="network-badge" id="network-badge" title="Iroh P2P Nativo (Internet Direta)">
             <span class="status-dot green"></span>
             <span class="network-ip" id="my-ip">P2P Nativo Pronto</span>
           </div>
         </div>
 
-        <!-- Centro do Header: Área de Conexão Rápida (Código LK ou IP de Amigo) -->
+        <!-- Centro do Header: Área de Conexão Rápida (Código de Sala P2P) -->
         <div class="header-center">
           <div class="omnibar-wrapper">
             <div class="omnibar-pill">
@@ -50,24 +50,12 @@
               <input
                 type="text"
                 id="manual-ip-input"
-                placeholder="Cole o código da sala (lk-...) ou IP para assistir..."
+                placeholder="Cole o código da sala (lk-...) para assistir..."
                 autocomplete="off"
                 spellcheck="false"
               />
 
-              <!-- Botão de Peers Locais Descobertos -->
-              <button
-                id="btn-peers-toggle"
-                class="btn-omnibar-peers"
-                type="button"
-                title="Ver amigos na rede local e salas ativas"
-              >
-                <span class="material-symbols-rounded ms-sm">radar</span>
-                <span class="peers-label-text">Peers</span>
-                <span class="badge-count" id="peers-count">0</span>
-              </button>
-
-              <button id="btn-add-manual" class="btn-omnibar-enter" title="Conectar à transmissão">
+              <button id="btn-add-manual" class="btn-omnibar-enter" title="Conectar à transmissão P2P">
                 <span>Entrar</span>
               </button>
             </div>
@@ -99,27 +87,6 @@
                     <span class="material-symbols-rounded ms-xs">person_off</span>
                     <span>Nenhum espectador ainda</span>
                   </div>
-                </div>
-              </div>
-            </div>
-
-            <!-- Chips Rápidos de Amigos Transmitindo Agora -->
-            <div id="live-peers-strip" class="live-peers-strip"></div>
-
-            <!-- Popover Flutuante de Peers Descobertos -->
-            <div id="peers-popover" class="peers-popover hidden">
-              <div class="peers-popover-header">
-                <div class="popover-title-group">
-                  <span class="material-symbols-rounded ms-sm">group</span>
-                  <h4>Amigos & Peers na Rede</h4>
-                </div>
-                <button id="btn-close-peers-popover" class="btn-icon-ghost" title="Fechar">
-                  <span class="material-symbols-rounded ms-sm">close</span>
-                </button>
-              </div>
-              <div class="peers-list" id="peers-list">
-                <div class="empty-peers">
-                  Buscando peers locais... Cole um Código de Sala (lk-...) na barra acima para conectar via Internet!
                 </div>
               </div>
             </div>
@@ -541,12 +508,12 @@
             <div class="update-version-row">
               <div class="version-box">
                 <span class="version-label">Versão Atual</span>
-                <span class="version-val current" id="update-curr-version">v0.3.9</span>
+                <span class="version-val current" id="update-curr-version">v0.4.1</span>
               </div>
               <span class="material-symbols-rounded version-arrow">arrow_forward</span>
               <div class="version-box">
                 <span class="version-label">Nova Versão</span>
-                <span class="version-val new" id="update-new-version">v0.3.9</span>
+                <span class="version-val new" id="update-new-version">v0.4.1</span>
               </div>
             </div>
 

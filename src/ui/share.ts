@@ -10,7 +10,6 @@ export interface ShareInfo {
   height: number;
   fps: number;
   codec?: string;
-  media_port: number;
   room_ticket?: string | null;
 }
 
@@ -526,7 +525,7 @@ export class ShareManager {
       this.btnStart.classList.add("hidden");
       this.btnStop.classList.remove("hidden");
 
-      this.statPort.textContent = `${info.media_port}`;
+      this.statPort.textContent = "P2P";
       this.previewFpsTag.textContent = `${info.fps} FPS`;
       this.previewResTag.textContent = `${info.width}x${info.height}`;
       if (!wasAlreadySharing) {

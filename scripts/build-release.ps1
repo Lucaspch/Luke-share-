@@ -42,7 +42,7 @@ if ($Version -ne "" -and $Version -ne $currentVer) {
     
     # Atualiza index.html tag
     $htmlContent = [System.IO.File]::ReadAllText($htmlPath, [System.Text.Encoding]::UTF8)
-    $htmlContent = [regex]::Replace($htmlContent, '(?<=class="version-tag">v)[0-9\.]+', $Version)
+    $htmlContent = [regex]::Replace($htmlContent, '(?<=class="version-tag"[^>]*>v)[0-9\.]+', $Version)
     [System.IO.File]::WriteAllText($htmlPath, $htmlContent, $utf8NoBom)
     
     $currentVer = $Version
@@ -93,7 +93,7 @@ $distDir = Join-Path $rootDir "release-dist"
 Get-Process -Name "Luke-Share", "luke-share" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 300
 if (Test-Path $distDir) {
-    Get-ChildItem -Path $distDir -File | Where-Object { $_.Name -like "*setup.exe*" -or $_.Name -like "*.sig" } | Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -Path $distDir -File | Where-Object { $_.Name -like "*setup.exe*" -or $_.Name -like "*.sig" -or $_.Name -eq "Luke-Share.exe" } | Remove-Item -Force -ErrorAction SilentlyContinue
 } else {
     New-Item -ItemType Directory -Path $distDir | Out-Null
 }

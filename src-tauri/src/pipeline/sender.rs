@@ -1,7 +1,6 @@
-//! Orquestrador de transmissão (Sender): captura WGC, scaler, encoder H.264,
-//! captura de áudio WASAPI com filtro do Discord, codificação Opus e transporte UDP com retransmissão NACK.
+//! Orquestrador de transmissão P2P (Sender): captura WGC, scaler GPU, encoder H.264/HEVC/AV1,
+//! captura de áudio WASAPI com filtro do Discord, codificação Opus com RED/FEC e transporte Iroh P2P.
 
-use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -17,10 +16,8 @@ use crate::capture::sources::SourceInfo;
 use crate::capture::wgc::WgcCapture;
 use crate::net::p2p::{P2pHostManager, RoomTicket};
 use crate::net::protocol::*;
-use crate::net::session::ControlServer;
 use crate::net::transport::{
-    generate_fec, packetize, parse_nack_payload, CongestionController, RetransmitRing,
-    DEFAULT_FEC_BLOCK_SIZE,
+    generate_fec, packetize, CongestionController, RetransmitRing,
 };
 use crate::video::d3d::Gpu;
 use crate::video::encoder::{EncodedFrame, EncoderConfig, H264Encoder, VideoCodec};
@@ -36,12 +33,13 @@ pub struct SenderPipeline {
     wgc_thread: Option<JoinHandle<()>>,
     enc_tx: crossbeam_channel::Sender<EncodedFrame>,
     encoder_holder: Arc<RwLock<Arc<H264Encoder>>>,
+    congestion_controller: Arc<Mutex<CongestionController>>,
+    base_target_bitrate: Arc< std::sync::atomic::AtomicU32 >,
     audio_cap: AudioCapturer,
     audio_tx: crossbeam_channel::Sender<Vec<f32>>,
-    control_server: Arc<ControlServer>,
-    pub p2p_host: Option<Arc<P2pHostManager>>,
+    pub p2p_endpoint: iroh::Endpoint,
+    pub p2p_host: Arc<P2pHostManager>,
     pub room_ticket: Option<RoomTicket>,
-    pub local_media_port: u16,
     pub out_resolution: (u32, u32),
     pub active_fps: u32,
     pub active_codec: VideoCodec,
@@ -53,16 +51,14 @@ pub struct SenderPipeline {
 
 impl SenderPipeline {
     pub fn start(
-        bind_ip: Ipv4Addr,
         source: SourceInfo,
         preset: Preset,
         fps_target: Option<u32>,
         custom_bitrate_kbps: Option<u32>,
         codec_pref: Option<String>,
         audio_muted: bool,
-        control_server: Arc<ControlServer>,
         preview_sink: Option<PreviewSink>,
-        p2p_endpoint: Option<iroh::Endpoint>,
+        p2p_endpoint: iroh::Endpoint,
     ) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         unsafe { let _ = windows::Win32::Media::timeBeginPeriod(1); };
@@ -80,23 +76,7 @@ impl SenderPipeline {
             Some(n) => (n, n),
         };
 
-        // 1. Cria socket UDP local
-        let sock2 = socket2::Socket::new(
-            socket2::Domain::IPV4,
-            socket2::Type::DGRAM,
-            Some(socket2::Protocol::UDP),
-        )?;
-        sock2.set_reuse_address(true)?;
-        let _ = sock2.set_send_buffer_size(4 * 1024 * 1024);
-        let _ = sock2.set_recv_buffer_size(4 * 1024 * 1024);
-        let bind_addr = SocketAddrV4::new(bind_ip, 0);
-        sock2.bind(&socket2::SockAddr::from(bind_addr))?;
-        let std_sock: std::net::UdpSocket = sock2.into();
-        std_sock.set_read_timeout(Some(Duration::from_millis(50)))?;
-        let local_media_port = std_sock.local_addr()?.port();
-        tracing::info!("sender: UDP socket bound strictly to {bind_ip}:{local_media_port}");
-
-        // 2. Inicializa dispositivo D3D11 e Captura WGC
+        // 1. Inicializa dispositivo D3D11 e Captura WGC
         let gpu = Gpu::new().context("falha ao criar contexto GPU D3D11")?;
         let (frame_tx, frame_rx) = crossbeam_channel::bounded(4);
         let cap = WgcCapture::start(&gpu, &source, capture_fps, frame_tx).context("falha ao iniciar WGC")?;
@@ -111,8 +91,7 @@ impl SenderPipeline {
         let mut scaler = Scaler::new(&gpu, initial_size, (out_w, out_h), effective_fps)
             .context("falha ao inicializar Scaler GPU")?;
 
-        // 3. Inicializa Encoder H.264
-        // Bitrate adaptado dinamicamente para altas taxas de quadros (>60 FPS) ou customizado
+        // 2. Inicializa Encoder de Vídeo
         let base_bitrate = if let Some(kbps) = custom_bitrate_kbps {
             kbps * 1_000
         } else {
@@ -124,6 +103,7 @@ impl SenderPipeline {
         } else {
             base_bitrate
         };
+        let base_target_bitrate = Arc::new(std::sync::atomic::AtomicU32::new(bitrate));
 
         let requested_codec = codec_pref
             .as_deref()
@@ -151,7 +131,7 @@ impl SenderPipeline {
         let active_codec = encoder.codec;
         let encoder_holder = Arc::new(RwLock::new(encoder.clone()));
 
-        // 4. Inicializa Captura de Áudio WASAPI com exclusão do Discord
+        // 3. Inicializa Captura de Áudio WASAPI com exclusão do Discord
         let (audio_tx, audio_rx) = crossbeam_channel::bounded::<Vec<f32>>(8);
         let audio_tx_clone = audio_tx.clone();
         let audio_target = match &source {
@@ -167,65 +147,60 @@ impl SenderPipeline {
         ).context("falha ao iniciar AudioCapturer WASAPI")?;
         audio_cap.set_muted(audio_muted);
 
-        let ring = Arc::new(Mutex::new(RetransmitRing::new(512)));
-        let min_bitrate = (bitrate / 3).max(3_000_000).min(bitrate);
+        // Ring buffer ampliado (2048 pacotes = ~1 a 4s de histórico) para cobrir NACKs em rotas de internet altas
+        let ring = Arc::new(Mutex::new(RetransmitRing::new(2048)));
+        let min_bitrate = (bitrate / 6).clamp(1_200_000, 2_500_000).min(bitrate);
         let congestion_controller = Arc::new(Mutex::new(CongestionController::new(min_bitrate, bitrate, bitrate)));
 
-        // Inicializa gerenciador P2P Nativo Iroh se fornecido
-        let (p2p_host, room_ticket) = if let Some(endpoint) = p2p_endpoint {
-            let host_mgr = Arc::new(P2pHostManager::new());
-            let ticket = match RoomTicket::new(&endpoint.addr()) {
-                Ok(t) => {
-                    tracing::info!("sender: Ticket P2P da sala gerado com sucesso: {}", t.raw);
-                    Some(t)
-                }
-                Err(e) => {
-                    tracing::warn!("sender: falha ao gerar RoomTicket: {e:#}");
-                    None
-                }
-            };
-
-            let v_offer = VideoOffer {
-                width: out_w,
-                height: out_h,
-                fps: effective_fps,
-                codec: active_codec.as_str().to_string(),
-            };
-            let a_offer = Some(AudioOffer {
-                sample_rate: 48000,
-                channels: 2,
-            });
-
-            let enc_kf = encoder_holder.clone();
-            let kf_req = Arc::new(move || {
-                enc_kf.read().request_keyframe();
-            });
-
-            let cc_p2p = congestion_controller.clone();
-            let enc_p2p = encoder_holder.clone();
-            let on_telemetry_p2p: Arc<dyn Fn(TelemetryReport) + Send + Sync> = Arc::new(move |rep| {
-                let loss = rep.loss_pct_x10 as f32 / 10.0;
-                let rtt = rep.rtt_ms as u32;
-                if let Some(new_br) = cc_p2p.lock().on_telemetry(rtt, loss) {
-                    enc_p2p.read().set_bitrate(new_br);
-                }
-            });
-
-            host_mgr.clone().start_listener(
-                endpoint,
-                v_offer,
-                a_offer,
-                ring.clone(),
-                kf_req,
-                nacks_served.clone(),
-                on_telemetry_p2p,
-                stop.clone(),
-            );
-
-            (Some(host_mgr), ticket)
-        } else {
-            (None, None)
+        // 4. Inicializa gerenciador P2P Nativo Iroh
+        let p2p_host = Arc::new(P2pHostManager::new());
+        let room_ticket = match RoomTicket::new(&p2p_endpoint.addr()) {
+            Ok(t) => {
+                tracing::info!("sender: Ticket P2P da sala gerado com sucesso: {}", t.raw);
+                Some(t)
+            }
+            Err(e) => {
+                tracing::warn!("sender: falha ao gerar RoomTicket: {e:#}");
+                None
+            }
         };
+
+        let v_offer = VideoOffer {
+            width: out_w,
+            height: out_h,
+            fps: effective_fps,
+            codec: active_codec.as_str().to_string(),
+        };
+        let a_offer = Some(AudioOffer {
+            sample_rate: 48000,
+            channels: 2,
+        });
+
+        let enc_kf = encoder_holder.clone();
+        let kf_req = Arc::new(move || {
+            enc_kf.read().request_keyframe();
+        });
+
+        let cc_p2p = congestion_controller.clone();
+        let enc_p2p = encoder_holder.clone();
+        let on_telemetry_p2p: Arc<dyn Fn(TelemetryReport) + Send + Sync> = Arc::new(move |rep| {
+            let loss = rep.loss_pct_x10 as f32 / 10.0;
+            let rtt = rep.rtt_ms as u32;
+            if let Some(new_br) = cc_p2p.lock().on_telemetry(rtt, loss) {
+                enc_p2p.read().set_bitrate(new_br);
+            }
+        });
+
+        p2p_host.clone().start_listener(
+            p2p_endpoint.clone(),
+            v_offer,
+            a_offer,
+            ring.clone(),
+            kf_req,
+            nacks_served.clone(),
+            on_telemetry_p2p,
+            stop.clone(),
+        );
 
         // --- Thread 1: WGC Capture -> Scaler -> Encoder ---
         let wgc_stop = Arc::new(AtomicBool::new(false));
@@ -248,14 +223,13 @@ impl SenderPipeline {
             drop(cap);
         })?;
 
-        // --- Thread 2: Video Packets -> Interleaved Round-Robin Dispatch (UDP + Iroh P2P) + Ring Buffer ---
+        // --- Thread 2: Video Packets -> Adaptive FEC + Interleaved Round-Robin Dispatch (Iroh P2P) ---
         let st2 = stop.clone();
         let ring2 = ring.clone();
         let cc2 = congestion_controller.clone();
-        let ctrl2 = control_server.clone();
+        let base_br_v = base_target_bitrate.clone();
         let p2p_host_v = p2p_host.clone();
         let enc2 = encoder_holder.clone();
-        let sock_v = std_sock.try_clone()?;
         let pkts_sent_v = packets_sent.clone();
         let bytes_sent_v = bytes_sent.clone();
 
@@ -299,17 +273,8 @@ impl SenderPipeline {
                             let _ = p_tx.try_send((ef.key, ts_90k, ef.data.clone()));
                         }
 
-                        let packets = packetize(KIND_VIDEO, fid, ef.key, ts_90k, &ef.data);
-                        let fec_packets = generate_fec(fid, ef.key, ts_90k, &packets, DEFAULT_FEC_BLOCK_SIZE);
-
-                        let udp_viewers = ctrl2.viewer_media_addrs();
-                        let p2p_viewers = if let Some(ref host) = p2p_host_v {
-                            host.active_viewers()
-                        } else {
-                            Vec::new()
-                        };
-
-                        let total_viewers = udp_viewers.len() + p2p_viewers.len();
+                        let p2p_viewers = p2p_host_v.active_viewers();
+                        let total_viewers = p2p_viewers.len();
                         if total_viewers == 0 {
                             continue;
                         }
@@ -317,12 +282,22 @@ impl SenderPipeline {
                         // Ajuste dinâmico de bitrate baseado no número total de espectadores
                         if total_viewers != last_viewers_cnt {
                             last_viewers_cnt = total_viewers;
-                            let target_br = calculate_adaptive_bitrate(bitrate, total_viewers);
-                            cc2.lock().set_max_bitrate(target_br);
-                            let cur_br = cc2.lock().current_bitrate();
+                            let base_br = base_br_v.load(Ordering::Relaxed);
+                            let target_br = calculate_adaptive_bitrate(base_br, total_viewers);
+                            let cur_br = {
+                                let mut cc = cc2.lock();
+                                cc.set_max_bitrate(target_br);
+                                cc.current_bitrate()
+                            };
                             enc2.read().set_bitrate(cur_br);
-                            tracing::info!("sender: ajustando teto do bitrate adaptativo para {target_br} bps (atual: {cur_br} bps, {total_viewers} espectadores)");
+                            tracing::info!(
+                                "sender: ajustando teto do bitrate adaptativo para {target_br} bps (atual: {cur_br} bps, {total_viewers} espectadores)"
+                            );
                         }
+
+                        let fec_block_size = cc2.lock().recommended_fec_block_size(ef.key);
+                        let packets = packetize(KIND_VIDEO, fid, ef.key, ts_90k, &ef.data);
+                        let fec_packets = generate_fec(fid, ef.key, ts_90k, &packets, fec_block_size);
 
                         {
                             let mut r = ring2.lock();
@@ -336,7 +311,7 @@ impl SenderPipeline {
                         let mut fec_idx = 0;
                         for (i, p) in packets.iter().enumerate() {
                             dispatch_list.push(p);
-                            if (i + 1) % DEFAULT_FEC_BLOCK_SIZE == 0 || i == packets.len() - 1 {
+                            if (i + 1) % fec_block_size == 0 || i == packets.len() - 1 {
                                 if fec_idx < fec_packets.len() {
                                     dispatch_list.push(&fec_packets[fec_idx]);
                                     fec_idx += 1;
@@ -344,41 +319,29 @@ impl SenderPipeline {
                             }
                         }
 
-                        // Intercalação + Rotação de peers (Round-Robin) para evitar viés de fila
-                        let num_udp = udp_viewers.len();
-                        let num_p2p = p2p_viewers.len();
+                        // Intercalação + Rotação de peers (Round-Robin) com micro-pacing anti-bufferbloat
                         let offset = (fid as usize) % total_viewers;
                         let mut bytes_in_burst = 0usize;
+                        let mut total_frame_bytes = 0usize;
+                        let pause_us: u128 = if ef.key { 280 } else { 180 };
 
                         for p in dispatch_list {
-                            let bytes_p2p = if num_p2p > 0 {
-                                Some(Bytes::copy_from_slice(p))
-                            } else {
-                                None
-                            };
-
+                            let bytes_p2p = Bytes::copy_from_slice(p);
                             for i in 0..total_viewers {
                                 let idx = (offset + i) % total_viewers;
-                                if idx < num_udp {
-                                    let target = udp_viewers[idx];
-                                    let _ = sock_v.send_to(p, target);
-                                } else {
-                                    let p2p_idx = idx - num_udp;
-                                    if let Some(ref b) = bytes_p2p {
-                                        let _ = p2p_viewers[p2p_idx].send_datagram(b.clone());
-                                    }
-                                }
+                                let _ = p2p_viewers[idx].send_datagram(bytes_p2p.clone());
                                 bytes_in_burst += p.len();
+                                total_frame_bytes += p.len();
                                 pkts_sent_v.fetch_add(1, Ordering::Relaxed);
                                 bytes_sent_v.fetch_add(p.len() as u64, Ordering::Relaxed);
                             }
 
-                            // Pacing de precisão sub-milissegundo:
-                            // A cada bloco de ~8 KB enviados, pausa de 200µs via spin-wait sem ceder quantum
-                            if bytes_in_burst >= 8192 {
+                            // Primeiros 12 KB saem imediatamente; acima disso aplica pacing suave a cada 6 KB
+                            // para não estourar filas de roteadores Wi-Fi/ISP em Keyframes grandes
+                            if total_frame_bytes > 12_288 && bytes_in_burst >= 6144 {
                                 bytes_in_burst = 0;
                                 let spin_start = std::time::Instant::now();
-                                while spin_start.elapsed().as_micros() < 200 {
+                                while spin_start.elapsed().as_micros() < pause_us {
                                     std::hint::spin_loop();
                                 }
                             }
@@ -389,11 +352,9 @@ impl SenderPipeline {
             }
         })?;
 
-        // --- Thread 3: Audio PCM -> Opus Encode -> Broadcast (UDP + Iroh P2P) ---
+        // --- Thread 3: Audio PCM -> Opus Encode (In-Band FEC) + Audio RED -> Broadcast P2P ---
         let st3 = stop.clone();
-        let ctrl3 = control_server.clone();
         let p2p_host_a = p2p_host.clone();
-        let sock_a = std_sock.try_clone()?;
         let pkts_sent_a = packets_sent.clone();
         let bytes_sent_a = bytes_sent.clone();
 
@@ -407,17 +368,13 @@ impl SenderPipeline {
             };
             let mut audio_seq: u32 = 1;
             let mut ts_90k: u32 = 0;
+            let mut prev_opus: Option<Vec<u8>> = None;
+
             while !st3.load(Ordering::SeqCst) {
                 match audio_rx.recv_timeout(Duration::from_millis(50)) {
                     Ok(pcm) => {
-                        let udp_viewers = ctrl3.viewer_media_addrs();
-                        let p2p_viewers = if let Some(ref host) = p2p_host_a {
-                            host.active_viewers()
-                        } else {
-                            Vec::new()
-                        };
-
-                        if udp_viewers.is_empty() && p2p_viewers.is_empty() {
+                        let p2p_viewers = p2p_host_a.active_viewers();
+                        if p2p_viewers.is_empty() {
                             continue;
                         }
 
@@ -425,99 +382,19 @@ impl SenderPipeline {
                             let fid = audio_seq;
                             audio_seq = audio_seq.wrapping_add(1);
                             ts_90k = ts_90k.wrapping_add(1800); // 960 amostras @ 48kHz = 20ms = 1800 ticks de 90kHz
-                            let pkts = packetize(KIND_AUDIO, fid, false, ts_90k, opus_data);
-                            for p in pkts {
-                                for addr in &udp_viewers {
-                                    let _ = sock_a.send_to(&p, *addr);
-                                    pkts_sent_a.fetch_add(1, Ordering::Relaxed);
-                                    bytes_sent_a.fetch_add(p.len() as u64, Ordering::Relaxed);
-                                }
-                                if !p2p_viewers.is_empty() {
-                                    let b = Bytes::copy_from_slice(&p);
-                                    for v in &p2p_viewers {
-                                        let _ = v.send_datagram(b.clone());
-                                        pkts_sent_a.fetch_add(1, Ordering::Relaxed);
-                                        bytes_sent_a.fetch_add(p.len() as u64, Ordering::Relaxed);
-                                    }
-                                }
+
+                            let pkt = pack_audio_red(prev_opus.as_deref(), opus_data, fid, ts_90k);
+                            prev_opus = Some(opus_data.to_vec());
+
+                            let b = Bytes::from(pkt);
+                            let pkt_len = b.len() as u64;
+                            for v in &p2p_viewers {
+                                let _ = v.send_datagram(b.clone());
+                                pkts_sent_a.fetch_add(1, Ordering::Relaxed);
+                                bytes_sent_a.fetch_add(pkt_len, Ordering::Relaxed);
                             }
                         }
                     }
-                    Err(_) => {}
-                }
-            }
-        })?;
-
-        // --- Thread 4: UDP Listener for NACKs and PLIs com PLI Coalescing (250ms) ---
-        let st4 = stop.clone();
-        let ring4 = ring.clone();
-        let cc_udp = congestion_controller.clone();
-        let enc4 = encoder_holder.clone();
-        let sock_rx = std_sock.try_clone()?;
-        let nacks_cnt = nacks_served.clone();
-
-        let listener_thread = std::thread::Builder::new().name("sender-udp-rx".into()).spawn(move || {
-            let mut buf = [0u8; 2048];
-            let mut last_pli = std::time::Instant::now() - Duration::from_secs(5);
-            let mut pending_pli = false;
-
-            while !st4.load(Ordering::SeqCst) {
-                // Checa se há PLI acumulado pronto para disparar no fim da janela de 250ms
-                if pending_pli && std::time::Instant::now().duration_since(last_pli) >= Duration::from_millis(250) {
-                    last_pli = std::time::Instant::now();
-                    pending_pli = false;
-                    tracing::info!("sender: disparando IDR acumulado por PLI coalescing (fim da janela de 250ms)");
-                    enc4.read().request_keyframe();
-                }
-
-                match sock_rx.recv_from(&mut buf) {
-                    Ok((n, from_addr)) => {
-                        if let Some((h, payload)) = MediaHeader::parse(&buf[..n]) {
-                            match h.kind {
-                                KIND_NACK => {
-                                    let missing = parse_nack_payload(payload);
-                                    let to_resend: Vec<std::sync::Arc<Vec<u8>>> = {
-                                        let ring = ring4.lock();
-                                        missing
-                                            .into_iter()
-                                            .filter_map(|idx| ring.get(h.frame_id, idx))
-                                            .collect()
-                                     };
-                                    let count = to_resend.len();
-                                    for pkt in to_resend {
-                                        let _ = sock_rx.send_to(&pkt, from_addr);
-                                    }
-                                    nacks_cnt.fetch_add(count as u64, Ordering::Relaxed);
-                                }
-                                KIND_PLI => {
-                                    let now = std::time::Instant::now();
-                                    if now.duration_since(last_pli) >= Duration::from_millis(250) {
-                                        last_pli = now;
-                                        pending_pli = false;
-                                        tracing::info!("sender: PLI recebido de {from_addr}, gerando keyframe IDR imediato");
-                                        enc4.read().request_keyframe();
-                                    } else {
-                                        pending_pli = true;
-                                        tracing::debug!("sender: PLI de {from_addr} agrupado (coalescing em janela de 250ms)");
-                                    }
-                                }
-                                KIND_TELEMETRY => {
-                                    if let Some(rep) = TelemetryReport::from_bytes(payload) {
-                                        let loss = rep.loss_pct_x10 as f32 / 10.0;
-                                        let rtt = rep.rtt_ms as u32;
-                                        if let Some(new_br) = cc_udp.lock().on_telemetry(rtt, loss) {
-                                            enc4.read().set_bitrate(new_br);
-                                        }
-                                    }
-                                }
-                                KIND_HELLO => {
-                                    tracing::debug!("sender: HELLO recebido de {from_addr}");
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
                     Err(_) => {}
                 }
             }
@@ -530,19 +407,20 @@ impl SenderPipeline {
             wgc_thread: Some(wgc_thread),
             enc_tx: enc_tx_clone,
             encoder_holder,
+            congestion_controller,
+            base_target_bitrate,
             audio_cap,
             audio_tx: audio_tx_clone,
-            control_server,
+            p2p_endpoint,
             p2p_host,
             room_ticket,
-            local_media_port,
             out_resolution: (out_w, out_h),
             active_fps: effective_fps,
             active_codec,
             packets_sent,
             bytes_sent,
             nacks_served,
-            threads: vec![video_thread, audio_thread, listener_thread, preview_thread],
+            threads: vec![video_thread, audio_thread, preview_thread],
         })
     }
 
@@ -591,6 +469,14 @@ impl SenderPipeline {
         } else {
             base_bitrate
         };
+        self.base_target_bitrate.store(bitrate, Ordering::Relaxed);
+        let viewers_cnt = self.p2p_host.viewers_count().max(1);
+        let adaptive_max = calculate_adaptive_bitrate(bitrate, viewers_cnt);
+        let initial_br = {
+            let mut cc = self.congestion_controller.lock();
+            cc.set_max_bitrate(adaptive_max);
+            cc.current_bitrate()
+        };
 
         let requested_codec = codec_pref
             .as_deref()
@@ -601,11 +487,11 @@ impl SenderPipeline {
             width: out_w,
             height: out_h,
             fps: effective_fps,
-            bitrate,
+            bitrate: initial_br,
             codec: requested_codec,
         };
 
-        // 3. Cria novo encoder H.264 e atualiza holder
+        // 3. Cria novo encoder e atualiza holder
         let enc_tx = self.enc_tx.clone();
         let new_encoder = Arc::new(H264Encoder::start(
             &self.gpu,
@@ -666,7 +552,7 @@ impl SenderPipeline {
             self.audio_cap = new_audio_cap;
         }
 
-        // 7. Notifica todos os espectadores (UDP + P2P) via Control::Reconfigure
+        // 7. Notifica todos os espectadores P2P via Control::Reconfigure
         let reconfig = Control::Reconfigure {
             video: VideoOffer {
                 width: out_w,
@@ -675,14 +561,9 @@ impl SenderPipeline {
                 codec: new_encoder.codec.as_str().to_string(),
             },
         };
-        let ctrl = self.control_server.clone();
         let p2p = self.p2p_host.clone();
-        let reconfig_clone = reconfig.clone();
         tauri::async_runtime::spawn(async move {
-            ctrl.broadcast(reconfig_clone.clone()).await;
-            if let Some(ref host) = p2p {
-                host.broadcast_control(reconfig_clone).await;
-            }
+            p2p.broadcast_control(reconfig).await;
         });
 
         // 8. Requisita um IDR imediato
@@ -694,25 +575,14 @@ impl SenderPipeline {
 
     pub fn set_audio_muted(&self, muted: bool) {
         self.audio_cap.set_muted(muted);
-        let ctrl = self.control_server.clone();
         let p2p = self.p2p_host.clone();
         tauri::async_runtime::spawn(async move {
-            ctrl.broadcast(Control::AudioState { enabled: !muted }).await;
-            if let Some(ref host) = p2p {
-                host.broadcast_control(Control::AudioState { enabled: !muted }).await;
-            }
+            p2p.broadcast_control(Control::AudioState { enabled: !muted }).await;
         });
     }
 
     pub fn request_keyframe(&self) {
         self.encoder_holder.read().request_keyframe();
-    }
-
-    pub fn keyframe_requester(&self) -> Arc<dyn Fn() + Send + Sync> {
-        let enc_holder = self.encoder_holder.clone();
-        Arc::new(move || {
-            enc_holder.read().request_keyframe();
-        })
     }
 
     pub fn stats(&self) -> (u64, u64, u64) {
@@ -724,29 +594,17 @@ impl SenderPipeline {
     }
 
     pub fn viewers_count(&self) -> usize {
-        let udp_cnt = self.control_server.viewers().len();
-        let p2p_cnt = self.p2p_host.as_ref().map(|h| h.viewers_count()).unwrap_or(0);
-        udp_cnt + p2p_cnt
+        self.p2p_host.viewers_count()
     }
 
     pub fn viewers_info(&self) -> Vec<String> {
         let mut list = Vec::new();
-        for v in self.control_server.viewers() {
-            let n = v.nick.trim();
+        for (id, nick) in self.p2p_host.viewers_info() {
+            let n = nick.trim();
             if !n.is_empty() {
                 list.push(n.to_string());
             } else {
-                list.push(format!("Espectador ({})", v.ip));
-            }
-        }
-        if let Some(ref host) = self.p2p_host {
-            for (id, nick) in host.viewers_info() {
-                let n = nick.trim();
-                if !n.is_empty() {
-                    list.push(n.to_string());
-                } else {
-                    list.push(format!("Espectador ({})", &id.to_string()[..6]));
-                }
+                list.push(format!("Espectador ({})", &id.to_string()[..6]));
             }
         }
         list
@@ -756,6 +614,10 @@ impl SenderPipeline {
         self.wgc_stop.store(true, Ordering::SeqCst);
         self.stop.store(true, Ordering::SeqCst);
         unsafe { let _ = windows::Win32::Media::timeEndPeriod(1); };
+        let ep = self.p2p_endpoint.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = ep.close().await;
+        });
         if let Some(t) = self.wgc_thread.take() {
             let _ = t.join();
         }
@@ -767,6 +629,8 @@ impl SenderPipeline {
 
 impl Drop for SenderPipeline {
     fn drop(&mut self) {
-        self.stop();
+        if !self.stop.load(Ordering::SeqCst) {
+            self.stop();
+        }
     }
 }

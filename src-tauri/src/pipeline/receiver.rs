@@ -1,8 +1,7 @@
-//! Orquestrador de recepção (Receiver): conecta ao transmissor via TCP de controle,
-//! recebe pacotes UDP de mídia em alta velocidade, remonta frames com NACK / PLI,
-//! decodifica áudio Opus e despacha para o WebView2 através de thread dedicada.
+//! Orquestrador de recepção P2P (Receiver): conecta ao transmissor via Iroh QUIC,
+//! recebe datagramas de mídia em alta velocidade, remonta vídeo com FEC + NACK adaptativo ao RTT,
+//! reconstrói perdas de áudio via Audio RED + Opus In-Band FEC + PLC e despacha para o WebView2.
 
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -15,15 +14,24 @@ use uuid::Uuid;
 use crate::audio::opus_enc::OpusDec;
 use crate::net::p2p::{RoomTicket, LUKE_SHARE_ALPN};
 use crate::net::protocol::*;
-use crate::net::session::ViewerClient;
 use crate::net::transport::{build_nack, Reassembler, RxEvent};
 use crate::pipeline::{base64_encode, StreamEvent};
 
 pub type StreamEventSink = Arc<dyn Fn(StreamEvent) + Send + Sync>;
 
+fn active_quic_rtt_ms(conn: &iroh::endpoint::Connection) -> u32 {
+    let paths = conn.paths();
+    paths
+        .iter()
+        .find(|p| p.is_selected())
+        .or_else(|| paths.iter().next())
+        .map(|p| p.rtt().as_millis() as u32)
+        .unwrap_or(0)
+}
+
 /// Deduplicador de pacotes de áudio baseado no frame_id sequencial.
-/// Garante que mesmo com múltiplos caminhos de rede (Mesh Relay, retransmissões UDP ou duplicatas)
-/// cada pacote de áudio PCM só seja decodificado e reproduzido exatamente uma vez.
+/// Garante que mesmo com múltiplos caminhos de rede (Mesh Relay, RED ou pacotes atrasados)
+/// cada quadro de áudio PCM só seja decodificado e reproduzido uma única vez.
 pub struct AudioDeduplicator {
     seen: [u32; 256],
     idx: usize,
@@ -37,6 +45,18 @@ impl AudioDeduplicator {
         }
     }
 
+    pub fn contains(&self, fid: u32) -> bool {
+        fid != 0 && self.seen.contains(&fid)
+    }
+
+    pub fn mark(&mut self, fid: u32) {
+        if fid == 0 || self.seen.contains(&fid) {
+            return;
+        }
+        self.seen[self.idx] = fid;
+        self.idx = (self.idx + 1) % self.seen.len();
+    }
+
     /// Retorna `true` se o `fid` já foi processado recentemente (ou seja, é duplicata).
     pub fn is_duplicate(&mut self, fid: u32) -> bool {
         if fid == 0 {
@@ -45,302 +65,135 @@ impl AudioDeduplicator {
         if self.seen.contains(&fid) {
             return true;
         }
-        self.seen[self.idx] = fid;
-        self.idx = (self.idx + 1) % self.seen.len();
+        self.mark(fid);
         false
+    }
+}
+
+/// Receptor de áudio resiliente contra perda de pacotes:
+/// 1. Recupera 1 pacote perdido de forma 100% lossless via Audio RED (`prev_opus`).
+/// 2. Recupera 2 pacotes consecutivos via Opus In-Band FEC (`decode_fec`) + Audio RED.
+/// 3. Suaviza rajadas de 3..5 pacotes perdidos usando Opus PLC (`decode_plc`) + FEC + RED.
+pub struct AudioStreamReceiver {
+    dec: Option<OpusDec>,
+    dedup: AudioDeduplicator,
+    last_fid: Option<u32>,
+}
+
+impl AudioStreamReceiver {
+    pub fn new() -> Self {
+        let dec = match OpusDec::new() {
+            Ok(d) => Some(d),
+            Err(e) => {
+                tracing::warn!("receiver_p2p: falha ao inicializar OpusDec: {e:#}");
+                None
+            }
+        };
+        Self {
+            dec,
+            dedup: AudioDeduplicator::new(),
+            last_fid: None,
+        }
+    }
+
+    pub fn push_packet(&mut self, h: &MediaHeader, payload: &[u8]) -> Vec<Vec<f32>> {
+        let mut out_frames = Vec::new();
+        let Some(dec) = &mut self.dec else {
+            return out_frames;
+        };
+
+        let fid = h.frame_id;
+        if let Some(last) = self.last_fid {
+            if (fid.wrapping_sub(last) as i32) <= 0 {
+                return out_frames;
+            }
+        }
+        if self.dedup.contains(fid) {
+            return out_frames;
+        }
+
+        let (prev_opus, curr_opus) = unpack_audio_red(h.flags, payload);
+
+        if let Some(last) = self.last_fid {
+            let diff = fid.wrapping_sub(last) as i32;
+            if diff > 1 {
+                let gap = (diff - 1) as usize;
+                let prev_fid = fid.wrapping_sub(1);
+
+                if gap == 1 {
+                    // 1 pacote perdido (fid - 1): recupera bit-a-bit via RED ou via Opus In-Band FEC
+                    if !self.dedup.contains(prev_fid) {
+                        if let Some(prev_bytes) = prev_opus {
+                            if let Ok(pcm) = dec.decode(prev_bytes) {
+                                self.dedup.mark(prev_fid);
+                                out_frames.push(pcm);
+                            }
+                        } else if let Ok(pcm) = dec.decode_fec(curr_opus) {
+                            self.dedup.mark(prev_fid);
+                            out_frames.push(pcm);
+                        }
+                    }
+                } else if gap <= 5 {
+                    // Rajada curta de perda (2 a 5 pacotes = 40ms a 100ms):
+                    // Usa PLC para pacotes mais antigos, FEC no penúltimo e RED no último perdido
+                    let plc_count = gap.saturating_sub(2).min(2);
+                    for _ in 0..plc_count {
+                        if let Ok(pcm) = dec.decode_plc() {
+                            out_frames.push(pcm);
+                        }
+                    }
+
+                    // Quadro fid - 2 reconstruído via In-Band FEC contido em prev_opus (se disponível) ou PLC
+                    let fid_minus_2 = fid.wrapping_sub(2);
+                    if !self.dedup.contains(fid_minus_2) {
+                        let recovered = if let Some(prev_bytes) = prev_opus {
+                            dec.decode_fec(prev_bytes).or_else(|_| dec.decode_plc())
+                        } else {
+                            dec.decode_plc()
+                        };
+                        if let Ok(pcm) = recovered {
+                            self.dedup.mark(fid_minus_2);
+                            out_frames.push(pcm);
+                        }
+                    }
+
+                    // Quadro fid - 1 reconstruído bit-a-bit via Audio RED ou In-Band FEC de curr_opus
+                    if !self.dedup.contains(prev_fid) {
+                        let recovered = if let Some(prev_bytes) = prev_opus {
+                            dec.decode(prev_bytes)
+                        } else {
+                            dec.decode_fec(curr_opus)
+                        };
+                        if let Ok(pcm) = recovered {
+                            self.dedup.mark(prev_fid);
+                            out_frames.push(pcm);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Ok(pcm) = dec.decode(curr_opus) {
+            self.dedup.mark(fid);
+            self.last_fid = Some(fid);
+            out_frames.push(pcm);
+        }
+
+        out_frames
     }
 }
 
 pub struct ReceiverPipeline {
     stop: Arc<AtomicBool>,
-    client: Arc<parking_lot::Mutex<Option<ViewerClient>>>,
-    udp_sock: Option<std::net::UdpSocket>,
     p2p_endpoint: Option<iroh::Endpoint>,
     p2p_conn: Option<iroh::endpoint::Connection>,
     p2p_send_ctrl: Arc<tokio::sync::Mutex<Option<iroh::endpoint::SendStream>>>,
-    remote_addr: Option<SocketAddr>,
     threads: Vec<JoinHandle<()>>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl ReceiverPipeline {
-    pub async fn start(
-        local_bind_ip: Ipv4Addr,
-        sharer_ip: Ipv4Addr,
-        sharer_ctrl_port: u16,
-        my_id: Uuid,
-        my_nick: String,
-        event_sink: StreamEventSink,
-    ) -> Result<Self> {
-        let stop = Arc::new(AtomicBool::new(false));
-
-        // 1. Vincula socket UDP local com buffer ampliado
-        let sock2 = socket2::Socket::new(
-            socket2::Domain::IPV4,
-            socket2::Type::DGRAM,
-            Some(socket2::Protocol::UDP),
-        )?;
-        sock2.set_reuse_address(true)?;
-        let _ = sock2.set_recv_buffer_size(4 * 1024 * 1024);
-        let _ = sock2.set_send_buffer_size(4 * 1024 * 1024);
-        let bind_addr = SocketAddrV4::new(local_bind_ip, 0);
-        sock2.bind(&socket2::SockAddr::from(bind_addr))?;
-        let std_sock: std::net::UdpSocket = sock2.into();
-        std_sock.set_read_timeout(Some(Duration::from_millis(2)))?;
-        let local_udp_port = std_sock.local_addr()?.port();
-        tracing::info!("receiver: UDP socket bound to {local_bind_ip}:{local_udp_port} (buffers=4MB)");
-
-        // Clone do socket para permitir requisições manuais de Keyframe (PLI) vindas do WebCodecs
-        let std_sock_clone = std_sock.try_clone()?;
-
-        // 2. Conecta ao host via TCP de controle
-        let sink_reconfig = event_sink.clone();
-        let sink_audio = event_sink.clone();
-        let sink_viewers = event_sink.clone();
-        let client = ViewerClient::connect(
-            sharer_ip,
-            sharer_ctrl_port,
-            my_id,
-            my_nick,
-            local_udp_port,
-            Arc::new(move |offer| {
-                sink_reconfig(StreamEvent::Config {
-                    width: offer.width,
-                    height: offer.height,
-                    fps: offer.fps,
-                    codec: offer.codec.clone(),
-                });
-            }),
-            Arc::new(move |enabled| {
-                sink_audio(StreamEvent::AudioState { enabled });
-            }),
-            Arc::new(move |count, viewers| {
-                sink_viewers(StreamEvent::Viewers { count, viewers });
-            }),
-        )
-        .await
-        .context("falha ao conectar ao anfitrião via controle")?;
-
-        let remote_media_port = client.remote_media_port;
-        let initial_video = client.video_offer.clone();
-        let remote_addr = SocketAddr::V4(SocketAddrV4::new(sharer_ip, remote_media_port));
-        let client_holder = Arc::new(parking_lot::Mutex::new(Some(client)));
-
-        // 3. Envia datagrama KIND_HELLO para abrir furos em firewalls/NAT
-        let hello = control_packet(KIND_HELLO, 0, &[]);
-        let _ = std_sock.send_to(&hello, remote_addr);
-
-        // Notifica o frontend com a resolução inicial
-        event_sink(StreamEvent::Config {
-            width: initial_video.width,
-            height: initial_video.height,
-            fps: initial_video.fps,
-            codec: initial_video.codec.clone(),
-        });
-
-        // 4. Filas desacopladas para que a recepção de pacotes UDP nunca bloqueie no IPC
-        let (video_tx, video_rx) = crossbeam_channel::bounded::<(bool, u32, Vec<u8>)>(64);
-        let (audio_tx, audio_rx) = crossbeam_channel::bounded::<Vec<u8>>(64);
-
-        // --- Thread A: Despacho IPC para o frontend (Base64 + Channel.send) ---
-        let st_disp = stop.clone();
-        let sink_disp = event_sink.clone();
-        let dispatch_thread = std::thread::Builder::new()
-            .name("receiver-ipc-dispatch".into())
-            .spawn(move || {
-                while !st_disp.load(Ordering::SeqCst) {
-                    crossbeam_channel::select! {
-                        recv(video_rx) -> msg => match msg {
-                            Ok((key, pts, data)) => {
-                                let b64 = base64_encode(&data);
-                                sink_disp(StreamEvent::Video {
-                                    key,
-                                    pts,
-                                    data: b64,
-                                });
-                            }
-                            Err(_) => break,
-                        },
-                        recv(audio_rx) -> msg => match msg {
-                            Ok(bytes) => {
-                                let b64 = base64_encode(&bytes);
-                                sink_disp(StreamEvent::Audio {
-                                    data: b64,
-                                });
-                            }
-                            Err(_) => break,
-                        },
-                        default(Duration::from_millis(50)) => {}
-                    }
-                }
-
-                sink_disp(StreamEvent::Ended {
-                    reason: "Transmissão encerrada".into(),
-                });
-            })?;
-
-        // --- Thread B: Loop de recepção e remontagem UDP sem bloqueio com Telemetria periódica ---
-        let st_udp = stop.clone();
-        let sink_telem = event_sink.clone();
-        let udp_thread = std::thread::Builder::new()
-            .name("receiver-udp-rx".into())
-            .spawn(move || {
-                let mut reassembler = Reassembler::new();
-                let mut audio_dedup = AudioDeduplicator::new();
-                let mut opus_dec = match OpusDec::new() {
-                    Ok(d) => Some(d),
-                    Err(e) => {
-                        tracing::warn!("receiver: falha ao inicializar OpusDec: {e:#}");
-                        None
-                    }
-                };
-
-                let start_instant = Instant::now();
-                let mut last_tick = Instant::now();
-                let mut last_telem = Instant::now();
-                let mut last_frames_delivered: u64 = 0;
-                let mut last_pkts_rx: u64 = 0;
-                let mut last_pkts_lost: u64 = 0;
-                let mut buf = [0u8; 2048];
-
-                while !st_udp.load(Ordering::SeqCst) {
-                    let now_ms = start_instant.elapsed().as_millis() as u64;
-
-                    // Lê pacotes UDP (drena enquanto houver pacotes no buffer)
-                    let mut read_any = false;
-                    for _ in 0..16 {
-                        match std_sock.recv_from(&mut buf) {
-                            Ok((n, from)) => {
-                                read_any = true;
-                                if from == remote_addr {
-                                    if let Some((h, payload)) = MediaHeader::parse(&buf[..n]) {
-                                        match h.kind {
-                                            KIND_VIDEO | KIND_FEC => {
-                                                let events = reassembler.push(&h, payload, now_ms);
-                                                for ev in events {
-                                                    match ev {
-                                                        RxEvent::Frame { key, ts_90k, data, .. } => {
-                                                            let _ = video_tx.try_send((key, ts_90k, data));
-                                                        }
-                                                        RxEvent::Nack { frame_id, missing } => {
-                                                            let nack_pkt = build_nack(frame_id, &missing);
-                                                            let _ = std_sock.send_to(&nack_pkt, remote_addr);
-                                                        }
-                                                        RxEvent::RequestKey => {
-                                                            let pli_pkt = control_packet(KIND_PLI, 0, &[]);
-                                                            let _ = std_sock.send_to(&pli_pkt, remote_addr);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            KIND_AUDIO => {
-                                                if !audio_dedup.is_duplicate(h.frame_id) {
-                                                    if let Some(dec) = &mut opus_dec {
-                                                        if let Ok(pcm) = dec.decode(payload) {
-                                                            let bytes: &[u8] = unsafe {
-                                                                std::slice::from_raw_parts(pcm.as_ptr() as *const u8, pcm.len() * 4)
-                                                            };
-                                                            let _ = audio_tx.try_send(bytes.to_vec());
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                            }
-                            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
-                                break;
-                            }
-                            Err(_) => {
-                                break;
-                            }
-                        }
-                    }
-
-                    // Tick periódico para detecção de pacotes perdidos (NACK / PLI)
-                    if last_tick.elapsed() >= Duration::from_millis(4) {
-                        last_tick = Instant::now();
-                        let tick_events = reassembler.tick(now_ms);
-                        for ev in tick_events {
-                            match ev {
-                                RxEvent::Nack { frame_id, missing } => {
-                                    let nack_pkt = build_nack(frame_id, &missing);
-                                    let _ = std_sock.send_to(&nack_pkt, remote_addr);
-                                }
-                                RxEvent::RequestKey => {
-                                    let pli_pkt = control_packet(KIND_PLI, 0, &[]);
-                                    let _ = std_sock.send_to(&pli_pkt, remote_addr);
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-
-                    // Telemetria periódica a cada 2 segundos enviada para o anfitrião e para a UI
-                    if last_telem.elapsed() >= Duration::from_millis(2000) {
-                        let elapsed_sec = last_telem.elapsed().as_secs_f32();
-                        last_telem = Instant::now();
-                        let stats = reassembler.stats();
-
-                        let frames_delta = stats.frames_delivered.saturating_sub(last_frames_delivered);
-                        last_frames_delivered = stats.frames_delivered;
-                        let effective_fps = (frames_delta as f32 / elapsed_sec.max(0.001)).round() as u32;
-
-                        let pkts_delta = stats.packets_rx.saturating_sub(last_pkts_rx);
-                        let lost_delta = stats.packets_lost.saturating_sub(last_pkts_lost);
-                        last_pkts_rx = stats.packets_rx;
-                        last_pkts_lost = stats.packets_lost;
-
-                        let total_pkts = pkts_delta + lost_delta;
-                        let loss_pct = if total_pkts > 0 {
-                            (lost_delta as f32 / total_pkts as f32) * 100.0
-                        } else {
-                            0.0
-                        };
-
-                        // Envia relatório de telemetria de volta para o host (ajuste AIMD de bitrate)
-                        let telem_report = TelemetryReport {
-                            rtt_ms: stats.rtt_ms.max(1) as u16,
-                            loss_pct_x10: ((loss_pct * 10.0) as u16).min(1000),
-                            nacks_sent: (stats.nacks_sent as u16).min(u16::MAX),
-                            fec_recovered: (stats.fec_recovered as u16).min(u16::MAX),
-                        };
-                        let telem_pkt = control_packet(KIND_TELEMETRY, 0, &telem_report.to_bytes());
-                        let _ = std_sock.send_to(&telem_pkt, remote_addr);
-
-                        sink_telem(StreamEvent::Telemetry {
-                            rtt_ms: stats.rtt_ms.max(1),
-                            packets_rx: stats.packets_rx,
-                            loss_pct,
-                            nacks_recovered: stats.nacks_recovered,
-                            fec_recovered: stats.fec_recovered,
-                            dropped_ref: stats.dropped_ref_frames,
-                            fps: effective_fps,
-                        });
-                    }
-
-                    if !read_any {
-                        std::hint::spin_loop();
-                    }
-                }
-            })?;
-
-        Ok(Self {
-            stop,
-            client: client_holder,
-            udp_sock: Some(std_sock_clone),
-            p2p_endpoint: None,
-            p2p_conn: None,
-            p2p_send_ctrl: Arc::new(tokio::sync::Mutex::new(None)),
-            remote_addr: Some(remote_addr),
-            threads: vec![dispatch_thread, udp_thread],
-            tasks: Vec::new(),
-        })
-    }
-
-    /// Modo 2: Conexão P2P Nativa sobre Iroh (Internet direta via RoomTicket sem VPN).
+    /// Conexão P2P Nativa sobre Iroh (Internet direta via RoomTicket).
     pub async fn start_p2p(
         endpoint: iroh::Endpoint,
         ticket: RoomTicket,
@@ -354,7 +207,7 @@ impl ReceiverPipeline {
         let target_addr = ticket.to_endpoint_addr().context("ticket de sala inválido")?;
         tracing::info!("receiver_p2p: conectando ao host P2P {}...", target_addr.id);
 
-        // 2. Conecta ao host via Iroh (QUIC + TLS 1.3 + STUN)
+        // 2. Conecta ao host via Iroh (QUIC + TLS 1.3 + STUN / Relay)
         let conn = endpoint
             .connect(target_addr, LUKE_SHARE_ALPN)
             .await
@@ -409,9 +262,9 @@ impl ReceiverPipeline {
             let _ = conn.send_datagram(Bytes::from(announce_pkt));
         }
 
-        // 4. Filas desacopladas para vídeo e áudio
-        let (video_tx, video_rx) = crossbeam_channel::bounded::<(bool, u32, Vec<u8>)>(64);
-        let (audio_tx, audio_rx) = crossbeam_channel::bounded::<Vec<u8>>(64);
+        // 4. Filas desacopladas para vídeo e áudio (ampliadas para absorver rajadas de recuperação NACK)
+        let (video_tx, video_rx) = crossbeam_channel::bounded::<(bool, u32, Vec<u8>)>(96);
+        let (audio_tx, audio_rx) = crossbeam_channel::bounded::<Vec<u8>>(96);
 
         // --- Thread A: Despacho IPC para o frontend (Base64 + Channel.send) ---
         let st_disp = stop.clone();
@@ -485,7 +338,7 @@ impl ReceiverPipeline {
             }
         });
 
-        // --- Tarefa D: Escuta e gerenciamento de conexões Mesh Relay locais ---
+        // --- Tarefa D: Escuta e gerenciamento de conexões Mesh Relay entre espectadores ---
         let mesh_peers: Arc<parking_lot::Mutex<Vec<iroh::endpoint::Connection>>> =
             Arc::new(parking_lot::Mutex::new(Vec::new()));
         let (mesh_dg_tx, mut mesh_dg_rx) = tokio::sync::mpsc::channel::<Bytes>(256);
@@ -520,7 +373,7 @@ impl ReceiverPipeline {
             }
         });
 
-        // --- Tarefa B: Loop de recepção e remontagem de Datagramas QUIC com Telemetria e Relé Mesh ---
+        // --- Tarefa B: Loop de recepção e remontagem de Datagramas QUIC com Telemetria Ágil (1s) ---
         let st_p2p = stop.clone();
         let sink_telem = event_sink.clone();
         let conn_rx = conn.clone();
@@ -529,18 +382,15 @@ impl ReceiverPipeline {
         let mesh_dg_tx_mesh = mesh_dg_tx.clone();
         let p2p_task = tokio::spawn(async move {
             let mut reassembler = Reassembler::new();
-            let mut audio_dedup = AudioDeduplicator::new();
-            let mut opus_dec = match OpusDec::new() {
-                Ok(d) => Some(d),
-                Err(e) => {
-                    tracing::warn!("receiver_p2p: falha ao inicializar OpusDec: {e:#}");
-                    None
-                }
-            };
+            let mut audio_rx_stream = AudioStreamReceiver::new();
+
+            let initial_rtt = active_quic_rtt_ms(&conn_rx);
+            reassembler.set_link_rtt_ms(initial_rtt);
 
             let start_instant = Instant::now();
+            let mut last_telem_instant = Instant::now();
             let mut tick_interval = tokio::time::interval(Duration::from_millis(4));
-            let mut telem_interval = tokio::time::interval(Duration::from_millis(2000));
+            let mut telem_interval = tokio::time::interval(Duration::from_millis(1000));
             let mut last_frames_delivered: u64 = 0;
             let mut last_pkts_rx: u64 = 0;
             let mut last_pkts_lost: u64 = 0;
@@ -578,18 +428,12 @@ impl ReceiverPipeline {
                                             }
                                         }
                                         KIND_AUDIO => {
-                                            if !audio_dedup.is_duplicate(h.frame_id) {
-                                                if let Some(dec) = &mut opus_dec {
-                                                    if let Ok(pcm) = dec.decode(payload) {
-                                                        let bytes: &[u8] = unsafe {
-                                                            std::slice::from_raw_parts(pcm.as_ptr() as *const u8, pcm.len() * 4)
-                                                        };
-                                                        let _ = audio_tx.try_send(bytes.to_vec());
-                                                    }
-                                                }
+                                            for pcm in audio_rx_stream.push_packet(&h, payload) {
+                                                let bytes: &[u8] = unsafe {
+                                                    std::slice::from_raw_parts(pcm.as_ptr() as *const u8, pcm.len() * 4)
+                                                };
+                                                let _ = audio_tx.try_send(bytes.to_vec());
                                             }
-                                            // NÃO retransmite áudio para peers mesh. O anfitrião já envia
-                                            // diretamente para todos os espectadores.
                                         }
                                         KIND_RELAY_ANNOUNCE => {
                                             if let Ok(ticket_str) = std::str::from_utf8(payload) {
@@ -630,7 +474,6 @@ impl ReceiverPipeline {
                         }
                     }
                     Some(mesh_dg) = mesh_dg_rx.recv() => {
-                        // Datagrama recebido de peer mesh assistido: alimenta o remontador sem reencaminhar
                         let now_ms = start_instant.elapsed().as_millis() as u64;
                         if let Some((h, payload)) = MediaHeader::parse(&mesh_dg) {
                             match h.kind {
@@ -643,15 +486,11 @@ impl ReceiverPipeline {
                                     }
                                 }
                                 KIND_AUDIO => {
-                                    if !audio_dedup.is_duplicate(h.frame_id) {
-                                        if let Some(dec) = &mut opus_dec {
-                                            if let Ok(pcm) = dec.decode(payload) {
-                                                let bytes: &[u8] = unsafe {
-                                                    std::slice::from_raw_parts(pcm.as_ptr() as *const u8, pcm.len() * 4)
-                                                };
-                                                let _ = audio_tx.try_send(bytes.to_vec());
-                                            }
-                                        }
+                                    for pcm in audio_rx_stream.push_packet(&h, payload) {
+                                        let bytes: &[u8] = unsafe {
+                                            std::slice::from_raw_parts(pcm.as_ptr() as *const u8, pcm.len() * 4)
+                                        };
+                                        let _ = audio_tx.try_send(bytes.to_vec());
                                     }
                                 }
                                 _ => {}
@@ -659,8 +498,13 @@ impl ReceiverPipeline {
                         }
                     }
                     _ = tick_interval.tick() => {
+                        let quic_rtt = active_quic_rtt_ms(&conn_rx);
+                        reassembler.set_link_rtt_ms(quic_rtt);
+
                         let now_ms = start_instant.elapsed().as_millis() as u64;
                         let tick_events = reassembler.tick(now_ms);
+                        let mut saw_loss_spike = false;
+
                         for ev in tick_events {
                             match ev {
                                 RxEvent::Nack { frame_id, missing } => {
@@ -668,18 +512,44 @@ impl ReceiverPipeline {
                                     let _ = conn_rx.send_datagram(Bytes::from(nack_pkt));
                                 }
                                 RxEvent::RequestKey => {
+                                    saw_loss_spike = true;
                                     let pli_pkt = control_packet(KIND_PLI, 0, &[]);
                                     let _ = conn_rx.send_datagram(Bytes::from(pli_pkt));
                                 }
                                 _ => {}
                             }
                         }
+
+                        // Reporte rápido de congestionamento se houve queda severa há mais de 350ms
+                        if saw_loss_spike && last_telem_instant.elapsed() >= Duration::from_millis(350) {
+                            let stats = reassembler.stats();
+                            let pkts_delta = stats.packets_rx.saturating_sub(last_pkts_rx);
+                            let lost_delta = stats.packets_lost.saturating_sub(last_pkts_lost);
+                            let total_pkts = pkts_delta + lost_delta;
+                            if lost_delta > 0 && total_pkts > 0 {
+                                let loss_pct = (lost_delta as f32 / total_pkts as f32) * 100.0;
+                                let telem_report = TelemetryReport {
+                                    rtt_ms: stats.rtt_ms.max(1) as u16,
+                                    loss_pct_x10: ((loss_pct * 10.0) as u16).clamp(30, 1000),
+                                    nacks_sent: (stats.nacks_sent as u16).min(u16::MAX),
+                                    fec_recovered: (stats.fec_recovered as u16).min(u16::MAX),
+                                };
+                                let telem_pkt = control_packet(KIND_TELEMETRY, 0, &telem_report.to_bytes());
+                                let _ = conn_rx.send_datagram(Bytes::from(telem_pkt));
+                            }
+                        }
                     }
                     _ = telem_interval.tick() => {
+                        let elapsed_sec = last_telem_instant.elapsed().as_secs_f32().max(0.1);
+                        last_telem_instant = Instant::now();
+
+                        let quic_rtt = active_quic_rtt_ms(&conn_rx);
+                        reassembler.set_link_rtt_ms(quic_rtt);
+
                         let stats = reassembler.stats();
                         let frames_delta = stats.frames_delivered.saturating_sub(last_frames_delivered);
                         last_frames_delivered = stats.frames_delivered;
-                        let effective_fps = (frames_delta as f32 / 2.0).round() as u32;
+                        let effective_fps = (frames_delta as f32 / elapsed_sec).round() as u32;
 
                         let pkts_delta = stats.packets_rx.saturating_sub(last_pkts_rx);
                         let lost_delta = stats.packets_lost.saturating_sub(last_pkts_lost);
@@ -693,7 +563,7 @@ impl ReceiverPipeline {
                             0.0
                         };
 
-                        // Envia relatório de telemetria de volta para o host (ajuste AIMD de bitrate)
+                        // Envia relatório de telemetria de volta para o host (ajuste AIMD de bitrate e FEC)
                         let telem_report = TelemetryReport {
                             rtt_ms: stats.rtt_ms.max(1) as u16,
                             loss_pct_x10: ((loss_pct * 10.0) as u16).min(1000),
@@ -719,12 +589,9 @@ impl ReceiverPipeline {
 
         Ok(Self {
             stop,
-            client: Arc::new(parking_lot::Mutex::new(None)),
-            udp_sock: None,
             p2p_endpoint: Some(endpoint),
             p2p_conn: Some(conn),
             p2p_send_ctrl,
-            remote_addr: None,
             threads: vec![dispatch_thread],
             tasks: vec![ctrl_task, p2p_task, mesh_listener_task],
         })
@@ -732,9 +599,6 @@ impl ReceiverPipeline {
 
     pub fn request_keyframe(&self) {
         let pli_pkt = control_packet(KIND_PLI, 0, &[]);
-        if let (Some(sock), Some(addr)) = (&self.udp_sock, self.remote_addr) {
-            let _ = sock.send_to(&pli_pkt, addr);
-        }
         if let Some(conn) = &self.p2p_conn {
             let _ = conn.send_datagram(Bytes::from(pli_pkt));
         }
@@ -742,10 +606,6 @@ impl ReceiverPipeline {
 
     pub async fn stop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        let mut client_opt = self.client.lock().take();
-        if let Some(mut client) = client_opt.take() {
-            client.close().await;
-        }
         if let Some(mut sc) = self.p2p_send_ctrl.lock().await.take() {
             let _ = write_control(&mut sc, &Control::Bye).await;
         }
@@ -767,6 +627,7 @@ impl ReceiverPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::opus_enc::OpusEnc;
     use crate::net::p2p::{create_endpoint, P2pHostManager, RoomTicket};
     use crate::net::transport::{packetize, RetransmitRing};
     use crossbeam_channel::unbounded;
@@ -810,30 +671,20 @@ mod tests {
             event_sink,
         ).await?;
 
-        // Aguarda para a sessão se estabilizar
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(host_mgr.viewers_count(), 1, "Host deve ter 1 espectador ativo");
         assert!(pli_called.load(Ordering::SeqCst), "Host deve ter recebido pedido de Keyframe inicial");
 
-        let viewers = host_mgr.active_viewers();
-        if let Some(v) = viewers.first() {
-            eprintln!("HOST VIEWER max_datagram_size: {:?}", v.conn.max_datagram_size());
-        }
-
-        // Envia um frame de vídeo fragmentado para o espectador
-        let frame_data = vec![0x12; 2500]; // ~3 fragmentos
+        let frame_data = vec![0x12; 2500];
         let pkts = packetize(KIND_VIDEO, 1, true, 9000, &frame_data);
         let viewers = host_mgr.active_viewers();
-        eprintln!("Test sending {} pkts to {} viewers", pkts.len(), viewers.len());
         for p in pkts {
             let b = Bytes::copy_from_slice(&p);
             for v in &viewers {
-                let res = v.send_datagram(b.clone());
-                eprintln!("v.send_datagram result: {res:?}");
+                let _ = v.send_datagram(b.clone());
             }
         }
 
-        // Verifica se o evento de vídeo chegou no receptor
         let mut got_video = false;
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline {
@@ -858,17 +709,58 @@ mod tests {
     fn test_audio_deduplicator() {
         let mut dedup = AudioDeduplicator::new();
         assert!(!dedup.is_duplicate(1));
-        assert!(dedup.is_duplicate(1)); // duplicata imediata descartada
+        assert!(dedup.is_duplicate(1));
         assert!(!dedup.is_duplicate(2));
         assert!(dedup.is_duplicate(2));
-        assert!(dedup.is_duplicate(1)); // ainda dentro do histórico
+        assert!(dedup.is_duplicate(1));
 
-        // Preenche com 256 frames novos
         for fid in 100..356 {
             assert!(!dedup.is_duplicate(fid));
         }
-        // Agora o 1 foi reciclado pelo ring buffer
         assert!(!dedup.is_duplicate(1));
         assert!(dedup.is_duplicate(1));
+    }
+
+    #[test]
+    fn test_audio_red_and_plc_resilience_under_heavy_loss() {
+        let mut enc = OpusEnc::new(128_000).unwrap();
+        let mut rx = AudioStreamReceiver::new();
+
+        // Gera 20 pacotes de áudio RED reais de 20ms
+        let mut wire_pkts = Vec::new();
+        let mut prev_opus: Option<Vec<u8>> = None;
+        for seq in 1..=20u32 {
+            let pcm: Vec<f32> = (0..960)
+                .flat_map(|i| {
+                    let t = ((seq as usize - 1) * 960 + i) as f32 / 48000.0;
+                    let v = 0.4 * (2.0 * std::f32::consts::PI * 440.0 * t).sin();
+                    [v, v]
+                })
+                .collect();
+            let cur = enc.encode(&pcm).unwrap().to_vec();
+            let pkt = pack_audio_red(prev_opus.as_deref(), &cur, seq, seq * 1800);
+            prev_opus = Some(cur);
+            wire_pkts.push(pkt);
+        }
+
+        // Cenário 1: 50% de perda alternada nos pacotes 1..=10 (perde 2, 4, 6, 8)
+        let mut total_pcm_chunks = 0;
+        for seq in [1usize, 3, 5, 7, 9, 10] {
+            let (h, pl) = MediaHeader::parse(&wire_pkts[seq - 1]).unwrap();
+            total_pcm_chunks += rx.push_packet(&h, pl).len();
+        }
+        // Todos os 10 quadros de 20ms foram reconstruídos sem buracos!
+        assert_eq!(total_pcm_chunks, 10);
+
+        // Cenário 2: Perda de 2 pacotes seguidos (perde 11 e 12; chega 13)
+        let (h13, pl13) = MediaHeader::parse(&wire_pkts[12]).unwrap();
+        let recovered_burst = rx.push_packet(&h13, pl13);
+        assert_eq!(recovered_burst.len(), 3, "Deve entregar FEC(#11) + RED(#12) + Primário(#13)");
+
+        // Cenário 3: Chegada fora de ordem (#15 chega antes do #14)
+        let (h15, pl15) = MediaHeader::parse(&wire_pkts[14]).unwrap();
+        assert_eq!(rx.push_packet(&h15, pl15).len(), 2, "Entrega #14 via RED + #15");
+        let (h14, pl14) = MediaHeader::parse(&wire_pkts[13]).unwrap();
+        assert_eq!(rx.push_packet(&h14, pl14).len(), 0, "Pacote atrasado #14 ignorado sem duplicar");
     }
 }

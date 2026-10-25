@@ -77,19 +77,20 @@ pub async fn read_control<R: AsyncReadExt + Unpin>(r: &mut R) -> std::io::Result
 
 pub const MEDIA_MAGIC: u8 = 0xA7;
 pub const HEADER_LEN: usize = 16;
-pub const MAX_PAYLOAD: usize = 1100; // 1100 + 16 HEADER_LEN = 1116 bytes (garante compatibilidade estrita com o limite de 1162 bytes do QUIC Datagram Iroh e túneis VPN)
+pub const MAX_PAYLOAD: usize = 1080; // 1080 + 24 (HEADER + FEC) = 1104 bytes (margem segura p/ QUIC Datagram Iroh, PPPoE, CGNAT e Relay)
 
 pub const KIND_VIDEO: u8 = 1;
 pub const KIND_AUDIO: u8 = 2;
 pub const KIND_NACK: u8 = 3;
 pub const KIND_PLI: u8 = 4;
-pub const KIND_HELLO: u8 = 5; // viewer → sharer: abre o "furo" UDP e informa o endpoint de origem
+pub const KIND_HELLO: u8 = 5; // viewer → sharer: abre rota de datagramas QUIC
 pub const KIND_FEC: u8 = 6;   // pacote de paridade Forward Error Correction (recuperação zero-RTT)
 pub const KIND_TELEMETRY: u8 = 7; // viewer → sharer: relatório periódico de RTT e perda para ABR
 pub const KIND_RELAY_ANNOUNCE: u8 = 8; // comunicação para topologia Mesh Relay entre viewers
 
-pub const FLAG_KEY: u8 = 0b01;
-pub const FLAG_LAST: u8 = 0b10;
+pub const FLAG_KEY: u8 = 0b001;
+pub const FLAG_LAST: u8 = 0b010;
+pub const FLAG_AUDIO_RED: u8 = 0b100; // áudio carrega cópia redundante do frame Opus anterior (fid - 1)
 
 pub const FEC_HEADER_LEN: usize = 4; // start_idx (2B) + count (2B)
 
@@ -171,6 +172,54 @@ pub fn control_packet(kind: u8, frame_id: u32, payload: &[u8]) -> Vec<u8> {
     MediaHeader { kind, flags: 0, frame_id, frag_idx: 0, frag_cnt: 1, ts_90k: 0 }.write(&mut v);
     v.extend_from_slice(payload);
     v
+}
+
+/// Empacota um quadro Opus atual junto com uma cópia redundante opcional do quadro anterior (`fid - 1`).
+/// Formato RED quando `FLAG_AUDIO_RED` está presente: `[prev_len: u16 BE][prev_opus][curr_opus]`.
+pub fn pack_audio_red(prev_opus: Option<&[u8]>, curr_opus: &[u8], frame_id: u32, ts_90k: u32) -> Vec<u8> {
+    if let Some(prev) = prev_opus {
+        if !prev.is_empty() && prev.len() <= u16::MAX as usize && (2 + prev.len() + curr_opus.len()) <= MAX_PAYLOAD {
+            let payload_len = 2 + prev.len() + curr_opus.len();
+            let mut out = Vec::with_capacity(HEADER_LEN + payload_len);
+            MediaHeader {
+                kind: KIND_AUDIO,
+                flags: FLAG_LAST | FLAG_AUDIO_RED,
+                frame_id,
+                frag_idx: 0,
+                frag_cnt: 1,
+                ts_90k,
+            }
+            .write(&mut out);
+            out.extend_from_slice(&(prev.len() as u16).to_be_bytes());
+            out.extend_from_slice(prev);
+            out.extend_from_slice(curr_opus);
+            return out;
+        }
+    }
+
+    let mut out = Vec::with_capacity(HEADER_LEN + curr_opus.len());
+    MediaHeader {
+        kind: KIND_AUDIO,
+        flags: FLAG_LAST,
+        frame_id,
+        frag_idx: 0,
+        frag_cnt: 1,
+        ts_90k,
+    }
+    .write(&mut out);
+    out.extend_from_slice(curr_opus);
+    out
+}
+
+/// Extrai `(prev_opus_opcional, curr_opus)` de um payload `KIND_AUDIO`.
+pub fn unpack_audio_red(flags: u8, payload: &[u8]) -> (Option<&[u8]>, &[u8]) {
+    if flags & FLAG_AUDIO_RED != 0 && payload.len() >= 2 {
+        let prev_len = u16::from_be_bytes([payload[0], payload[1]]) as usize;
+        if 2 + prev_len <= payload.len() {
+            return (Some(&payload[2..2 + prev_len]), &payload[2 + prev_len..]);
+        }
+    }
+    (None, payload)
 }
 
 #[cfg(test)]
