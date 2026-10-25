@@ -8,3 +8,5 @@ src-tauri/.updater-key
 *.zip
 release-dist/
 Luke-Share-v*/
+cloudflare-worker/node_modules/
+cloudflare-worker/.wrangler/

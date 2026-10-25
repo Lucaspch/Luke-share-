@@ -48,25 +48,27 @@ pub fn family_roots(table: &[ProcInfo], names: &[String]) -> Vec<u32> {
     roots
 }
 
-/// Modo Tela Inteira: todo o áudio do sistema, exceto o do Discord.
-/// `audio_session_pids` só é consultado no caso multi-raiz (2+ árvores do Discord).
+/// Modo Tela Inteira: todo o áudio do sistema, exceto o do Discord (e exceto o próprio Luke-Share
+/// quando `self_is_playing` está ativo reproduzindo a live de um amigo).
 pub fn plan_system(
     table: &[ProcInfo],
     names: &[String],
     self_pid: u32,
+    self_is_playing: bool,
     audio_session_pids: impl FnOnce() -> Vec<u32>,
 ) -> CapturePlan {
     let roots = family_roots(table, names);
+    let self_root = root_of(table, self_pid);
     match roots.len() {
-        // Sem Discord: exclui o próprio app (que nunca toca áudio) → áudio de todo o sistema.
-        0 => CapturePlan::Exclude { root: self_pid },
-        1 => CapturePlan::Exclude { root: roots[0] },
+        // Sem Discord: exclui a árvore do próprio app → áudio de todo o sistema sem eco.
+        0 => CapturePlan::Exclude { root: self_root },
+        1 if !self_is_playing => CapturePlan::Exclude { root: roots[0] },
         _ => {
             let mut out: Vec<u32> = audio_session_pids()
                 .into_iter()
-                .filter(|pid| !is_excluded(table, *pid, names))
+                .filter(|pid| *pid != self_pid && !is_excluded(table, *pid, names))
                 .map(|pid| root_of(table, pid))
-                .filter(|r| !is_excluded(table, *r, names))
+                .filter(|r| *r != self_root && !is_excluded(table, *r, names))
                 .collect();
             out.sort_unstable();
             out.dedup();
@@ -120,19 +122,23 @@ mod tests {
     #[test]
     fn system_plan_no_discord_excludes_self() {
         let t: Vec<_> = table().into_iter().filter(|p| !p.exe.starts_with("discord") && p.exe != "update.exe").collect();
-        assert_eq!(plan_system(&t, &names(), 999, Vec::new), CapturePlan::Exclude { root: 999 });
+        assert_eq!(plan_system(&t, &names(), 999, false, Vec::new), CapturePlan::Exclude { root: 999 });
     }
 
     #[test]
     fn system_plan_single_discord() {
         let t = &table()[..7];
-        assert_eq!(plan_system(t, &names(), 999, || panic!("não deve consultar sessões")), CapturePlan::Exclude { root: 210 });
+        assert_eq!(plan_system(t, &names(), 999, false, || panic!("não deve consultar sessões")), CapturePlan::Exclude { root: 210 });
+        // Quando o próprio Luke-Share está reproduzindo áudio WASAPI ao mesmo tempo que o Discord está aberto,
+        // exclui ambos (Discord + self_pid 999) via Include mixer!
+        let t_with_chrome_child = &table()[..8];
+        assert_eq!(plan_system(t_with_chrome_child, &names(), 999, true, || vec![301, 211, 999]), CapturePlan::Include { roots: vec![300] });
     }
 
     #[test]
     fn system_plan_multi_root_uses_include_mixer() {
         // sessões ativas: chrome (filho), discord (filho) e canary → só chrome sobra, pela raiz
-        let plan = plan_system(&table(), &names(), 999, || vec![301, 211, 401, 300]);
+        let plan = plan_system(&table(), &names(), 999, false, || vec![301, 211, 401, 300]);
         assert_eq!(plan, CapturePlan::Include { roots: vec![300] });
     }
 

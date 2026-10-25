@@ -41,7 +41,13 @@ pub enum Control {
     /// viewer → sharer
     Watch { peer_id: Uuid, nick: String, udp_port: u16 },
     /// sharer → viewer
-    Accept { video: VideoOffer, audio: Option<AudioOffer>, udp_port: u16 },
+    Accept {
+        video: VideoOffer,
+        audio: Option<AudioOffer>,
+        udp_port: u16,
+        #[serde(default)]
+        stream_token: Option<[u8; 16]>,
+    },
     Reject { reason: String },
     /// sharer → viewer: dimensões mudaram
     Reconfigure { video: VideoOffer },
@@ -49,6 +55,16 @@ pub enum Control {
     AudioState { enabled: bool },
     /// sharer → viewer: lista atualizada de espectadores assistindo a live
     ViewersUpdate { count: u32, viewers: Vec<String> },
+    /// sharer → viewer (downstream): instrui conexão em cascata a um par de fibra autenticado
+    RelayAssign {
+        relay_ticket: String,
+        relay_peer_id: Uuid,
+        stream_token: [u8; 16],
+    },
+    /// sharer → viewer (upstream): ativa/desativa papel de retransmissor mesh
+    RelayRole { active: bool },
+    /// viewer → sharer: confirma ativação ou queda da cascata P2P para alívio de upload do Host
+    RelayStatus { connected: bool, relay_peer_id: Uuid },
     Bye,
 }
 
@@ -222,6 +238,57 @@ pub fn unpack_audio_red(flags: u8, payload: &[u8]) -> (Option<&[u8]>, &[u8]) {
     (None, payload)
 }
 
+/// Calcula uma tag rápida de autenticação de 8 bits (sempre não-zero: `1..=255`) sobre o cabeçalho
+/// e amostras das extremidades do payload usando o segredo da sessão (`stream_token`).
+/// Armazenada no byte reservado `pkt[3]` do `MediaHeader` para autenticar datagramas em cascata P2P.
+pub fn compute_packet_auth_tag(secret: &[u8; 16], pkt: &[u8]) -> u8 {
+    if pkt.len() < HEADER_LEN {
+        return 0;
+    }
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in secret {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    // Mixa bytes fixos do cabeçalho exceto pkt[3] (onde fica a própria tag)
+    for &b in &pkt[0..3] {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    for &b in &pkt[4..HEADER_LEN] {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    let payload = &pkt[HEADER_LEN..];
+    let head_len = payload.len().min(24);
+    for &b in &payload[..head_len] {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    if payload.len() > 24 {
+        for &b in &payload[payload.len() - 16..] {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    let folded = ((h >> 32) as u8) ^ (h as u8) ^ ((h >> 16) as u8);
+    if folded == 0 { 0xA5 } else { folded }
+}
+
+pub fn sign_packet_in_place(pkt: &mut [u8], secret: &[u8; 16]) {
+    if pkt.len() >= HEADER_LEN {
+        pkt[3] = compute_packet_auth_tag(secret, pkt);
+    }
+}
+
+pub fn verify_packet_tag(pkt: &[u8], secret: &[u8; 16]) -> bool {
+    if pkt.len() < HEADER_LEN || pkt[0] != MEDIA_MAGIC {
+        return false;
+    }
+    let tag = pkt[3];
+    tag != 0 && tag == compute_packet_auth_tag(secret, pkt)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,10 +308,39 @@ mod tests {
         assert!(MediaHeader::parse(&v).is_none());
     }
 
+    #[test]
+    fn packet_auth_tag_roundtrip_and_tamper() {
+        let secret = [0x42u8; 16];
+        let mut pkt = Vec::new();
+        MediaHeader {
+            kind: KIND_VIDEO,
+            flags: FLAG_KEY,
+            frame_id: 10,
+            frag_idx: 0,
+            frag_cnt: 2,
+            ts_90k: 9000,
+        }
+        .write(&mut pkt);
+        pkt.extend_from_slice(&[0xAB; 64]);
+
+        assert!(!verify_packet_tag(&pkt, &secret));
+        sign_packet_in_place(&mut pkt, &secret);
+        assert!(verify_packet_tag(&pkt, &secret));
+
+        // Adulteração no payload invalida a tag imediatamente
+        pkt[20] ^= 0xFF;
+        assert!(!verify_packet_tag(&pkt, &secret));
+    }
+
     #[tokio::test]
     async fn control_roundtrip() {
         let (mut a, mut b) = tokio::io::duplex(4096);
-        let m = Control::Accept { video: VideoOffer { width: 1920, height: 1080, fps: 60, codec: "h264".into() }, audio: Some(AudioOffer { sample_rate: 48000, channels: 2 }), udp_port: 5000 };
+        let m = Control::Accept {
+            video: VideoOffer { width: 1920, height: 1080, fps: 60, codec: "h264".into() },
+            audio: Some(AudioOffer { sample_rate: 48000, channels: 2 }),
+            udp_port: 5000,
+            stream_token: Some([7u8; 16]),
+        };
         write_control(&mut a, &m).await.unwrap();
         assert_eq!(read_control(&mut b).await.unwrap(), m);
     }

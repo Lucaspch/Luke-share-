@@ -11,6 +11,26 @@ pub mod process_tree;
 
 #[cfg(windows)]
 pub mod loopback;
+#[cfg(windows)]
+pub mod player;
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AudioCaptureMode {
+    /// Quando uma janela é escolhida, captura somente o áudio do processo/árvore daquela janela.
+    #[default]
+    AppOnly,
+    /// Captura todo o áudio do sistema com isolamento automático do Discord (e do próprio Luke-Share).
+    SystemNoDiscord,
+}
+
+impl AudioCaptureMode {
+    pub fn from_str_opt(s: Option<&str>) -> Self {
+        match s.map(|v| v.trim().to_lowercase()).as_deref() {
+            Some("system") | Some("system_no_discord") | Some("sistema") => Self::SystemNoDiscord,
+            _ => Self::AppOnly,
+        }
+    }
+}
 
 #[cfg(windows)]
 pub use capturer::*;
@@ -51,8 +71,9 @@ mod capturer {
 
     fn compute_plan(target: AudioTarget, names: &[String]) -> CapturePlan {
         let table = snapshot();
+        let self_playing = super::player::active_audio_players_count() > 0;
         match target {
-            AudioTarget::System => plan_system(&table, names, std::process::id(), active_session_pids),
+            AudioTarget::System => plan_system(&table, names, std::process::id(), self_playing, active_session_pids),
             AudioTarget::Window { pid } => plan_window(&table, names, pid),
         }
     }

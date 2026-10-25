@@ -28,7 +28,7 @@
           </a>
 
           <div class="header-version-cluster">
-            <span class="version-tag" id="header-version-tag">v0.4.1</span>
+            <span class="version-tag" id="header-version-tag">v0.5.0</span>
             <button id="btn-check-updates" class="btn-check-update" title="Verificar atualizações">
               <span class="material-symbols-rounded ms-sm">sync</span>
               <span>Atualizações</span>
@@ -36,13 +36,13 @@
             </button>
           </div>
 
-          <div class="network-badge" id="network-badge" title="Iroh P2P Nativo (Internet Direta)">
+          <div class="network-badge" id="network-badge" title="Iroh P2P Nativo + Áudio WASAPI + IPC Binário">
             <span class="status-dot green"></span>
             <span class="network-ip" id="my-ip">P2P Nativo Pronto</span>
           </div>
         </div>
 
-        <!-- Centro do Header: Área de Conexão Rápida (Código de Sala P2P) -->
+        <!-- Centro do Header: Área de Conexão Rápida (Código Curto LK-XXXX-XXXX ou Ticket lk-...) -->
         <div class="header-center">
           <div class="omnibar-wrapper">
             <div class="omnibar-pill">
@@ -50,7 +50,7 @@
               <input
                 type="text"
                 id="manual-ip-input"
-                placeholder="Cole o código da sala (lk-...) para assistir..."
+                placeholder="Cole o código curto (LK-XXXX-XXXX) ou ticket (lk-)..."
                 autocomplete="off"
                 spellcheck="false"
               />
@@ -67,7 +67,7 @@
               title="Clique para copiar o Código da sua Sala P2P e enviar aos amigos"
             >
               <span class="material-symbols-rounded ms-sm">vpn_key</span>
-              <span class="ticket-pill-label">Código</span>
+              <span class="ticket-pill-label" id="top-ticket-pill-label">Código</span>
               <span class="material-symbols-rounded ms-xs">content_copy</span>
             </button>
 
@@ -94,6 +94,64 @@
         </div>
 
         <div class="header-right">
+          <!-- Menu de Identidade Permanente (LK#TAG) e Lista de Amigos -->
+          <div class="friends-popover-wrapper">
+            <button
+              id="btn-friends-toggle"
+              class="btn-friends-header"
+              type="button"
+              title="Sua Identidade Criptográfica (LK#TAG) e Lista de Amigos"
+            >
+              <span class="material-symbols-rounded ms-sm">group</span>
+              <span class="friends-btn-text">Amigos</span>
+              <span id="my-tag-label" class="my-tag-mini">LK#----</span>
+              <span id="friends-badge" class="friends-count-badge hidden">0</span>
+            </button>
+
+            <div id="friends-popover" class="friends-popover hidden">
+              <div class="friends-popover-header">
+                <div class="friends-popover-title">
+                  <span class="material-symbols-rounded ms-sm">verified_user</span>
+                  <span>Identidade &amp; Amigos</span>
+                </div>
+                <button
+                  id="btn-copy-my-tag"
+                  class="btn-copy-tag-pill"
+                  type="button"
+                  title="Identidade Ed25519 permanente deste PC. Clique para copiar sua Tag."
+                >
+                  <span id="popover-my-tag-val">LK#----</span>
+                  <span class="material-symbols-rounded ms-xs">content_copy</span>
+                </button>
+              </div>
+
+              <div class="friends-add-box">
+                <input
+                  type="text"
+                  id="add-friend-tag-input"
+                  maxlength="10"
+                  placeholder="Adicionar amigo (ex.: LK#7M2Q)"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+                <button id="btn-send-friend-req" class="btn-primary btn-xs" type="button">
+                  <span class="material-symbols-rounded ms-xs">person_add</span>
+                  <span>Adicionar</span>
+                </button>
+              </div>
+
+              <div id="friends-pending-section" class="friends-section hidden">
+                <div class="friends-section-label">Pedidos Recebidos (Confirmação Mútua)</div>
+                <div id="friends-pending-list" class="friends-list"></div>
+              </div>
+
+              <div class="friends-section">
+                <div class="friends-section-label">Seus Amigos</div>
+                <div id="friends-accepted-list" class="friends-list"></div>
+              </div>
+            </div>
+          </div>
+
           <div class="user-profile-cluster">
             <div class="nick-container">
               <label for="nick-input">Apelido:</label>
@@ -254,11 +312,21 @@
                   <label class="checkbox-label">
                     <input type="checkbox" id="audio-enable-checkbox" checked />
                     <span class="material-symbols-rounded ms-sm">volume_up</span>
-                    <span>Transmitir Áudio do Sistema</span>
+                    <span id="audio-checkbox-label-text">Transmitir Áudio</span>
                   </label>
+                  <div id="audio-mode-group" class="audio-mode-group hidden">
+                    <label for="audio-mode-select">
+                      <span class="material-symbols-rounded ms-xs">tune</span>
+                      <span>Modo de Áudio da Janela:</span>
+                    </label>
+                    <select id="audio-mode-select">
+                      <option value="app" selected>Apenas este aplicativo (Jogo isolado)</option>
+                      <option value="system">Sistema inteiro (sem Discord)</option>
+                    </select>
+                  </div>
                   <div class="discord-badge">
                     <span class="material-symbols-rounded ms-xs">verified_user</span>
-                    <span>Discord.exe isolado automaticamente (Zero Eco)</span>
+                    <span id="audio-badge-hint">Discord.exe isolado automaticamente (Zero Eco)</span>
                   </div>
                 </div>
 
@@ -468,15 +536,26 @@
                   </select>
                 </div>
 
+                <div id="modal-audio-mode-group" class="control-group hidden">
+                  <label for="modal-audio-mode-select">
+                    <span class="material-symbols-rounded ms-xs">tune</span>
+                    Modo de Áudio da Janela
+                  </label>
+                  <select id="modal-audio-mode-select">
+                    <option value="app" selected>Apenas este aplicativo (Jogo isolado)</option>
+                    <option value="system">Sistema inteiro (sem Discord)</option>
+                  </select>
+                </div>
+
                 <div class="control-group">
                   <label class="checkbox-label">
                     <input type="checkbox" id="modal-audio-enable-checkbox" checked />
                     <span class="material-symbols-rounded ms-sm">volume_up</span>
-                    <span>Transmitir Áudio do Sistema</span>
+                    <span>Transmitir Áudio</span>
                   </label>
                   <div class="discord-badge">
                     <span class="material-symbols-rounded ms-xs">verified_user</span>
-                    <span>Discord.exe isolado automaticamente (sem eco)</span>
+                    <span id="modal-audio-badge-hint">Discord.exe isolado automaticamente (sem eco)</span>
                   </div>
                 </div>
               </div>
@@ -508,12 +587,12 @@
             <div class="update-version-row">
               <div class="version-box">
                 <span class="version-label">Versão Atual</span>
-                <span class="version-val current" id="update-curr-version">v0.4.1</span>
+                <span class="version-val current" id="update-curr-version">v0.5.0</span>
               </div>
               <span class="material-symbols-rounded version-arrow">arrow_forward</span>
               <div class="version-box">
                 <span class="version-label">Nova Versão</span>
-                <span class="version-val new" id="update-new-version">v0.4.1</span>
+                <span class="version-val new" id="update-new-version">v0.5.0</span>
               </div>
             </div>
 
@@ -547,6 +626,9 @@
           </div>
         </div>
       </div>
+
+      <!-- Pedidos de Entrada ("Knock Protocol" P2P do Host) -->
+      <div id="knock-toast-container" class="knock-toast-container"></div>
 
       <!-- Container de Notificações Flutuantes (Toasts) -->
       <div id="toast-container" class="toast-container"></div>

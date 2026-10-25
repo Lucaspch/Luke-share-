@@ -1,4 +1,6 @@
-//! Player de mídia de ultra-baixa latência usando WebCodecs (VideoDecoder) e Web Audio API (PCM f32).
+//! Player de vídeo de ultra-baixa latência usando WebCodecs (VideoDecoder) com recepção
+//! IPC Binária direta (`ArrayBuffer` -> `Uint8Array` zero-copy, zero Base64).
+//! O áudio é reproduzido nativamente no motor WASAPI em Rust (`NativeAudioPlayer`).
 
 export interface PlayerStats {
   width: number;
@@ -7,11 +9,11 @@ export interface PlayerStats {
 }
 
 export type StreamEvent =
-  | { t: "video"; k: boolean; p: number; d: string }
-  | { t: "audio"; d: string }
   | { t: "config"; width: number; height: number; fps: number; codec?: string }
   | { t: "audio_state"; enabled: boolean }
   | { t: "viewers"; count: number; viewers: string[] }
+  | { t: "reconnecting"; attempt: number; remaining_secs: number }
+  | { t: "reconnected" }
   | {
       t: "telemetry";
       rtt_ms: number;
@@ -21,18 +23,32 @@ export type StreamEvent =
       fec_recovered?: number;
       dropped_ref: number;
       fps: number;
+      via_relay?: boolean;
     }
   | { t: "ended"; reason: string };
+
+export type StreamChannelMsg = ArrayBuffer | Uint8Array | StreamEvent;
+
+const BIN_VIDEO_MAGIC = 0x56; // 'V'
+const BIN_VIDEO_FLAG_KEY = 0x01;
+const BIN_VIDEO_HEADER_LEN = 8;
+
+export function extractBinaryBuffer(msg: StreamChannelMsg): ArrayBuffer | null {
+  if (msg instanceof ArrayBuffer) {
+    return msg;
+  }
+  if (msg instanceof Uint8Array) {
+    return msg.byteOffset === 0 && msg.byteLength === msg.buffer.byteLength
+      ? (msg.buffer as ArrayBuffer)
+      : (msg.slice().buffer as ArrayBuffer);
+  }
+  return null;
+}
 
 export class StreamPlayer {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   private videoDecoder: VideoDecoder | null = null;
-  private audioCtx: AudioContext | null = null;
-  private gainNode: GainNode | null = null;
-  private nextAudioPlayTime = 0;
-  private audioTargetLeadSec = 0.045;
-  private lastUnderrunTime = 0;
   private overlay: HTMLElement | null;
   private statsCallback?: (stats: PlayerStats) => void;
   private onRequestKey?: () => void;
@@ -52,7 +68,7 @@ export class StreamPlayer {
     canvas: HTMLCanvasElement,
     overlay: HTMLElement | null,
     statsCallback?: (stats: PlayerStats) => void,
-    enableAudio = true,
+    _enableAudio = true,
     onRequestKey?: () => void
   ) {
     this.canvas = canvas;
@@ -60,22 +76,7 @@ export class StreamPlayer {
     this.statsCallback = statsCallback;
     this.onRequestKey = onRequestKey;
     this.ctx = canvas.getContext("2d", { alpha: false, desynchronized: true })!;
-
-    if (enableAudio) {
-      this.initAudio();
-    }
     this.initVideo();
-  }
-
-  private initAudio() {
-    try {
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      this.audioCtx = new AudioContextClass({ sampleRate: 48000, latencyHint: "interactive" });
-      this.gainNode = this.audioCtx.createGain();
-      this.gainNode.connect(this.audioCtx.destination);
-    } catch (e) {
-      console.warn("Falha ao inicializar Web Audio Context:", e);
-    }
   }
 
   private initVideo() {
@@ -112,7 +113,6 @@ export class StreamPlayer {
         this.ctx.drawImage(frame, 0, 0, this.canvas.width, this.canvas.height);
         frame.close();
 
-        // Notifica estatísticas no primeiro frame para evitar '0x0'
         if (!this.hasFirstDecodedFrame) {
           this.hasFirstDecodedFrame = true;
           if (this.statsCallback && this.currentWidth > 0 && this.currentHeight > 0) {
@@ -189,12 +189,9 @@ export class StreamPlayer {
           optimizeForLatency: true,
           hardwareAcceleration: "prefer-hardware",
         });
-        console.log(`VideoDecoder configurado com sucesso para: ${codecString}`);
         configured = true;
         break;
-      } catch (e) {
-        console.warn(`Tentativa com codec ${codecString} falhou, tentando próximo:`, e);
-      }
+      } catch (_) {}
     }
 
     if (!configured) {
@@ -221,55 +218,60 @@ export class StreamPlayer {
       return false;
     }
 
-    try {
-      if (!this.pipVideo) {
-        this.pipVideo = document.createElement("video");
-        this.pipVideo.muted = true;
-        this.pipVideo.playsInline = true;
-        this.pipVideo.autoplay = true;
-        this.pipVideo.style.position = "fixed";
-        this.pipVideo.style.top = "-9999px";
-        this.pipVideo.style.left = "-9999px";
-        this.pipVideo.style.width = "1px";
-        this.pipVideo.style.height = "1px";
-        this.pipVideo.style.opacity = "0";
-        this.pipVideo.style.pointerEvents = "none";
-        document.body.appendChild(this.pipVideo);
+    if (!this.pipVideo) {
+      this.pipVideo = document.createElement("video");
+      this.pipVideo.muted = true;
+      this.pipVideo.playsInline = true;
+      this.pipVideo.autoplay = true;
+      this.pipVideo.style.position = "fixed";
+      this.pipVideo.style.top = "-9999px";
+      this.pipVideo.style.left = "-9999px";
+      this.pipVideo.style.width = "1px";
+      this.pipVideo.style.height = "1px";
+      this.pipVideo.style.opacity = "0";
+      this.pipVideo.style.pointerEvents = "none";
+      document.body.appendChild(this.pipVideo);
 
-        this.pipVideo.addEventListener("leavepictureinpicture", () => {
-          this.isPiP = false;
-        });
-      }
-
-      const stream = (this.canvas as any).captureStream ? (this.canvas as any).captureStream(60) : null;
-      if (!stream) {
-        throw new Error("captureStream() não suportado no canvas deste navegador");
-      }
-
-      this.pipVideo.srcObject = stream;
-      await this.pipVideo.play();
-      await this.pipVideo.requestPictureInPicture();
-      this.isPiP = true;
-      return true;
-    } catch (e) {
-      console.warn("Erro ao iniciar Picture-in-Picture:", e);
-      throw e;
+      this.pipVideo.addEventListener("leavepictureinpicture", () => {
+        this.isPiP = false;
+      });
     }
+
+    const stream = (this.canvas as any).captureStream ? (this.canvas as any).captureStream(60) : null;
+    if (!stream) {
+      throw new Error("captureStream() não suportado no canvas deste navegador");
+    }
+
+    this.pipVideo.srcObject = stream;
+    await this.pipVideo.play();
+    await this.pipVideo.requestPictureInPicture();
+    this.isPiP = true;
+    return true;
   }
 
-  public handleVideoFrame(base64Data: string, isKey: boolean, pts: number) {
-    // Se o decoder fechou ou não foi inicializado, reinicia
+  /**
+   * Recebe o pacote binário puro do IPC do Tauri v2 (`ArrayBuffer`), sem Base64 e sem cópias extras:
+   * `[0x56, flags, 0, 0, pts_u32_le(4B), ...bitstream]`
+   */
+  public handleBinaryVideoPacket(buf: ArrayBuffer) {
+    if (buf.byteLength <= BIN_VIDEO_HEADER_LEN) return;
+    const view = new DataView(buf);
+    if (view.getUint8(0) !== BIN_VIDEO_MAGIC) return;
+
+    const isKey = (view.getUint8(1) & BIN_VIDEO_FLAG_KEY) !== 0;
+    const pts = view.getUint32(4, true);
+    const bitstream = new Uint8Array(buf, BIN_VIDEO_HEADER_LEN);
+
+    this.decodeBitstream(bitstream, isKey, pts);
+  }
+
+  public decodeBitstream(bytes: Uint8Array, isKey: boolean, pts: number) {
     if (!this.videoDecoder || this.videoDecoder.state !== "configured") {
       this.initVideo();
       if (!this.videoDecoder || this.videoDecoder.state !== "configured") return;
     }
 
-    // Se o decoder acumular mais de 36 frames na fila (travamento real de GPU/aba em background,
-    // acima de rajadas normais de destravamento NACK em 60-240 FPS):
-    // Limpa a fila inteira com reset(), descarta até o próximo IDR e dispara pedido imediato de PLI ao host.
-    // NUNCA descarte um P-frame isolado, pois quebra toda a predição temporal H.264 subsequente!
     if (this.videoDecoder.decodeQueueSize > 36) {
-      console.warn("VideoDecoder decodeQueueSize > 36; resetando fila e solicitando IDR imediato...");
       try {
         this.videoDecoder.reset();
         this.configureDecoder();
@@ -281,114 +283,27 @@ export class StreamPlayer {
       return;
     }
 
-    // WebCodecs exige um keyframe como primeiro chunk após configure/reset
     if (!this.hasFirstKeyFrame) {
       if (!isKey) {
-        return; // Aguarda o primeiro IDR antes de aceitar frames delta
+        return;
       }
       this.hasFirstKeyFrame = true;
     }
 
     try {
-      const binary = atob(base64Data);
-      const len = binary.length;
-      const bytes = new Uint8Array(len);
-      for (let i = 0; i < len; i++) {
-        bytes[i] = binary.charCodeAt(i);
-      }
-
       const chunk = new EncodedVideoChunk({
         type: isKey ? "key" : "delta",
         timestamp: pts,
         data: bytes,
       });
-
       this.videoDecoder.decode(chunk);
     } catch (e) {
       console.warn("Erro decodificando frame de vídeo:", e);
     }
   }
 
-  public handleAudioChunk(base64Data: string) {
-    if (!this.audioCtx || !this.gainNode) return;
-
-    try {
-      if (this.audioCtx.state === "suspended") {
-        this.audioCtx.resume();
-      }
-
-      const binary = atob(base64Data);
-      const len = binary.length;
-      const bytes = new Uint8Array(len);
-      for (let i = 0; i < len; i++) {
-        bytes[i] = binary.charCodeAt(i);
-      }
-
-      const floats = new Float32Array(bytes.buffer);
-      const numSamples = floats.length / 2;
-      if (numSamples === 0) return;
-
-      const buffer = this.audioCtx.createBuffer(2, numSamples, 48000);
-      const left = buffer.getChannelData(0);
-      const right = buffer.getChannelData(1);
-
-      for (let i = 0; i < numSamples; i++) {
-        left[i] = floats[i * 2];
-        right[i] = floats[i * 2 + 1];
-      }
-
-      const curTime = this.audioCtx.currentTime;
-      const lead = this.nextAudioPlayTime - curTime;
-      let playbackRate = 1.0;
-      let applyMicroFade = false;
-
-      if (lead < 0) {
-        if (this.nextAudioPlayTime > 0) {
-          applyMicroFade = true;
-          if (curTime - this.lastUnderrunTime < 4.0) {
-            // Rede instável: amplia suavemente o colchão de jitter até 85ms
-            this.audioTargetLeadSec = Math.min(0.085, this.audioTargetLeadSec + 0.01);
-          }
-          this.lastUnderrunTime = curTime;
-        }
-        this.nextAudioPlayTime = curTime + this.audioTargetLeadSec;
-      } else if (lead > 0.28) {
-        // Apenas em rajadas extremas (>280ms acumulados) realinha o buffer com fade suave
-        applyMicroFade = true;
-        this.nextAudioPlayTime = curTime + this.audioTargetLeadSec;
-      } else if (lead > this.audioTargetLeadSec + 0.075) {
-        // Aceleração imperceptível (3%) para drenar atraso acumulado sem picotar ou sobrepor áudio
-        playbackRate = 1.03;
-      } else if (curTime - this.lastUnderrunTime > 8.0 && this.audioTargetLeadSec > 0.045) {
-        // Rede estável há mais de 8s: reduz gradualmente o colchão de volta para 45ms
-        this.audioTargetLeadSec = Math.max(0.045, this.audioTargetLeadSec - 0.0005);
-      }
-
-      if (applyMicroFade) {
-        const fadeSamples = Math.min(96, numSamples); // ~2ms @ 48kHz evita estalos secos na retomada
-        for (let i = 0; i < fadeSamples; i++) {
-          const g = i / fadeSamples;
-          left[i] *= g;
-          right[i] *= g;
-        }
-      }
-
-      const src = this.audioCtx.createBufferSource();
-      src.buffer = buffer;
-      src.playbackRate.value = playbackRate;
-      src.connect(this.gainNode);
-
-      src.start(this.nextAudioPlayTime);
-      this.nextAudioPlayTime += buffer.duration / playbackRate;
-    } catch (e) {
-      console.warn("Erro reproduzindo áudio PCM:", e);
-    }
-  }
-
-  public setVolume(volume: number) {
-    if (this.gainNode && this.audioCtx) {
-      this.gainNode.gain.setValueAtTime(Math.max(0, Math.min(1, volume)), this.audioCtx.currentTime);
-    }
+  public markAwaitingKeyFrame() {
+    this.hasFirstKeyFrame = false;
   }
 
   public destroy() {
@@ -407,13 +322,6 @@ export class StreamPlayer {
       }
       this.pipVideo.remove();
       this.pipVideo = null;
-    }
-
-    if (this.audioCtx) {
-      try {
-        this.audioCtx.close();
-      } catch (_) {}
-      this.audioCtx = null;
     }
   }
 }

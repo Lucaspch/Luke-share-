@@ -1,0 +1,9 @@
+name = "luke-share-edge"
+main = "src/index.ts"
+compatibility_date = "2026-01-01"
+
+# Crie o namespace KV com: npx wrangler kv namespace create LUKE_KV
+# e substitua o `id` abaixo pelo ID retornado no terminal antes de rodar `npx wrangler deploy`.
+[[kv_namespaces]]
+binding = "LUKE_KV"
+id = "SUBSTITUA_PELO_ID_DO_SEU_KV_NAMESPACE"

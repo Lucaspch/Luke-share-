@@ -1,5 +1,10 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
-import { StreamPlayer, StreamEvent } from "../media/player";
+import {
+  StreamPlayer,
+  StreamEvent,
+  StreamChannelMsg,
+  extractBinaryBuffer,
+} from "../media/player";
 
 export type SourceInfo =
   | { kind: "Monitor"; id: number; name: string; width: number; height: number; primary: boolean; refresh_rate: number }
@@ -10,7 +15,9 @@ export interface ShareInfo {
   height: number;
   fps: number;
   codec?: string;
+  short_code?: string | null;
   room_ticket?: string | null;
+  audio_mode?: string;
 }
 
 export interface StreamStats {
@@ -37,6 +44,8 @@ export interface ModalShareElements {
   fpsSelect: HTMLSelectElement;
   bitrateSelect: HTMLSelectElement;
   audioCheckbox: HTMLInputElement;
+  audioModeGroup?: HTMLElement | null;
+  audioModeSelect?: HTMLSelectElement | null;
 }
 
 export interface ShareManagerElements {
@@ -51,6 +60,8 @@ export interface ShareManagerElements {
   sourcePreviewPlaceholder?: HTMLElement;
   btnRefreshPreview?: HTMLButtonElement;
   audioCheckbox: HTMLInputElement;
+  audioModeGroup?: HTMLElement | null;
+  audioModeSelect?: HTMLSelectElement | null;
   btnStart: HTMLButtonElement;
   btnStop: HTMLButtonElement;
   btnStopTop: HTMLButtonElement;
@@ -78,6 +89,8 @@ export class ShareManager {
   private fpsSelect: HTMLSelectElement | null = null;
   private bitrateSelect: HTMLSelectElement | null = null;
   private audioCheckbox: HTMLInputElement;
+  private audioModeGroup: HTMLElement | null = null;
+  private audioModeSelect: HTMLSelectElement | null = null;
   private btnStart: HTMLButtonElement;
   private btnStop: HTMLButtonElement;
   private btnStopTop: HTMLButtonElement;
@@ -99,8 +112,12 @@ export class ShareManager {
   private sourcePreviewPlaceholder: HTMLElement | null = null;
   private btnRefreshPreview: HTMLButtonElement | null = null;
   private currentRoomTicket: string | null = null;
+  private currentShortCode: string | null = null;
+  private currentRawTicket: string | null = null;
+  private activeAudioMode: "app" | "system" = "system";
   private modal?: ModalShareElements;
   public onPreviewStreamEvent?: (msg: StreamEvent) => void;
+  public onPreviewBinaryFrame?: (buf: ArrayBuffer) => void;
   public onViewersCountChange?: (count: number, text: string) => void;
   public onViewersChange?: (count: number, viewers: string[], text: string) => void;
   private currentShareInfo: ShareInfo | null = null;
@@ -129,6 +146,8 @@ export class ShareManager {
     this.sourcePreviewPlaceholder = elements.sourcePreviewPlaceholder || null;
     this.btnRefreshPreview = elements.btnRefreshPreview || null;
     this.audioCheckbox = elements.audioCheckbox;
+    this.audioModeGroup = elements.audioModeGroup || null;
+    this.audioModeSelect = elements.audioModeSelect || null;
     this.btnStart = elements.btnStart;
     this.btnStop = elements.btnStop;
     this.btnStopTop = elements.btnStopTop;
@@ -160,9 +179,19 @@ export class ShareManager {
         this.tabButtons.forEach((t) => t.classList.remove("active"));
         tab.classList.add("active");
         this.activeTab = tab.dataset.tab as "monitors" | "windows";
+        this.ensureSelectionMatchesTab();
         this.renderSources();
       });
     });
+
+    if (this.audioModeSelect) {
+      this.audioModeSelect.addEventListener("change", () => {
+        if (this.modal?.audioModeSelect && this.audioModeSelect) {
+          this.modal.audioModeSelect.value = this.audioModeSelect.value;
+        }
+        this.syncAudioModeUI();
+      });
+    }
 
     this.btnStart.addEventListener("click", () => this.startShare());
     this.btnStop.addEventListener("click", () => this.stopShare());
@@ -217,10 +246,55 @@ export class ShareManager {
           this.modal?.tabButtons.forEach((t) => t.classList.remove("active"));
           tab.classList.add("active");
           this.activeTab = tab.dataset.tab as "monitors" | "windows";
+          this.ensureSelectionMatchesTab();
           this.renderSources();
         });
       });
+      if (this.modal.audioModeSelect) {
+        this.modal.audioModeSelect.addEventListener("change", () => {
+          if (this.audioModeSelect && this.modal?.audioModeSelect) {
+            this.audioModeSelect.value = this.modal.audioModeSelect.value;
+          }
+          this.syncAudioModeUI();
+        });
+      }
     }
+  }
+
+  private ensureSelectionMatchesTab() {
+    const selected = this.currentSources.find((s) => s.id === this.selectedSourceId);
+    const desiredKind = this.activeTab === "monitors" ? "Monitor" : "Window";
+    if (!selected || selected.kind !== desiredKind) {
+      const candidate = this.currentSources.find((s) => s.kind === desiredKind);
+      if (candidate) {
+        this.selectedSourceId = candidate.id;
+        this.updateSourceSnapshot(candidate.id);
+      }
+    }
+    this.syncAudioModeUI();
+  }
+
+  private syncAudioModeUI() {
+    const selected = this.currentSources.find((s) => s.id === this.selectedSourceId);
+    const isWindow = selected ? selected.kind === "Window" : this.activeTab === "windows";
+
+    if (this.audioModeGroup) {
+      this.audioModeGroup.classList.toggle("hidden", !isWindow);
+    }
+    if (this.modal?.audioModeGroup) {
+      this.modal.audioModeGroup.classList.toggle("hidden", !isWindow);
+    }
+
+    const modeVal = this.audioModeSelect?.value || this.modal?.audioModeSelect?.value || "app";
+    const hintText =
+      isWindow && modeVal === "app"
+        ? "Som exclusivo deste aplicativo/jogo (Spotify, navegador e Discord ignorados)"
+        : "Discord.exe isolado automaticamente (Zero Eco)";
+
+    const hintEl = document.getElementById("audio-badge-hint");
+    if (hintEl) hintEl.textContent = hintText;
+    const modalHintEl = document.getElementById("modal-audio-badge-hint");
+    if (modalHintEl) modalHintEl.textContent = hintText;
   }
 
   public openShareModal(isSwitching: boolean = false) {
@@ -229,7 +303,11 @@ export class ShareManager {
     if (this.fpsSelect && this.modal.fpsSelect) this.modal.fpsSelect.value = this.fpsSelect.value;
     if (this.bitrateSelect && this.modal.bitrateSelect) this.modal.bitrateSelect.value = this.bitrateSelect.value;
     if (this.codecSelect && this.modal.codecSelect) this.modal.codecSelect.value = this.codecSelect.value;
+    if (this.audioModeSelect && this.modal.audioModeSelect) {
+      this.modal.audioModeSelect.value = this.audioModeSelect.value;
+    }
     this.modal.audioCheckbox.checked = this.audioCheckbox.checked;
+    this.syncAudioModeUI();
 
     const titleEl = document.getElementById("modal-share-title");
     const btnTextEl = document.getElementById("modal-share-start-btn-text");
@@ -299,6 +377,9 @@ export class ShareManager {
     if (this.isAudioMuted) {
       this.statAudioTag.textContent = "Áudio mutado";
       this.btnToggleMute.textContent = "Desmutar";
+    } else if (this.activeAudioMode === "app") {
+      this.statAudioTag.textContent = "Áudio exclusivo do aplicativo";
+      this.btnToggleMute.textContent = "Mutar Áudio";
     } else {
       this.statAudioTag.textContent = "Áudio ativo (Discord isolado)";
       this.btnToggleMute.textContent = "Mutar Áudio";
@@ -328,6 +409,7 @@ export class ShareManager {
         this.updateSourceSnapshot(this.selectedSourceId);
       }
 
+      this.syncAudioModeUI();
       this.renderSources();
     } catch (e) {
       this.sourcesGrid.innerHTML = `<div class="empty-peers">Erro ao listar fontes: ${e}</div>`;
@@ -395,6 +477,7 @@ export class ShareManager {
       card.addEventListener("click", () => {
         this.selectedSourceId = src.id;
         this.updateSourceSnapshot(src.id);
+        this.syncAudioModeUI();
         if (this.fpsSelect && src.refresh_rate) {
           const autoOpt = this.fpsSelect.querySelector('option[value="auto"]');
           if (autoOpt) {
@@ -425,6 +508,12 @@ export class ShareManager {
     const fSelect = fromModal && this.modal ? this.modal.fpsSelect : this.fpsSelect;
     const bitSelect = fromModal && this.modal ? this.modal.bitrateSelect : this.bitrateSelect;
     const codSelect = fromModal && this.modal ? this.modal.codecSelect : this.codecSelect;
+    const modeSelect =
+      fromModal && this.modal?.audioModeSelect ? this.modal.audioModeSelect : this.audioModeSelect;
+
+    const selectedSource = this.currentSources.find((s) => s.id === this.selectedSourceId);
+    const audioMode =
+      selectedSource?.kind === "Window" ? (modeSelect?.value === "system" ? "system" : "app") : "system";
 
     const preset = resSelect.value;
     const audioEnabled = audCheck.checked;
@@ -476,23 +565,31 @@ export class ShareManager {
         );
       }
 
-      // Cria o canal Tauri v2 para o feed de vídeo espelhado em tempo real
-      const onPreview = new Channel<StreamEvent>();
-      onPreview.onmessage = (msg: StreamEvent) => {
-        if (this.previewPlayer) {
-          if (msg.t === "video") {
-            this.previewPlayer.handleVideoFrame(msg.d, msg.k, msg.p);
-          } else if (msg.t === "config") {
-            if (msg.width && msg.height) {
-              this.previewPlayer.setDimensions(msg.width, msg.height);
-            }
-            if (msg.codec) {
-              this.previewPlayer.configureDecoder(msg.codec);
-            }
+      // Cria o canal binário Tauri v2 (ArrayBuffer direto sem Base64 + JSON de controle)
+      const onPreview = new Channel<StreamChannelMsg>();
+      onPreview.onmessage = (msg: StreamChannelMsg) => {
+        const bin = extractBinaryBuffer(msg);
+        if (bin) {
+          if (this.previewPlayer) {
+            this.previewPlayer.handleBinaryVideoPacket(bin);
+          }
+          if (this.onPreviewBinaryFrame) {
+            this.onPreviewBinaryFrame(bin);
+          }
+          return;
+        }
+
+        const ev = msg as StreamEvent;
+        if (this.previewPlayer && ev.t === "config") {
+          if (ev.width && ev.height) {
+            this.previewPlayer.setDimensions(ev.width, ev.height);
+          }
+          if (ev.codec) {
+            this.previewPlayer.configureDecoder(ev.codec);
           }
         }
         if (this.onPreviewStreamEvent) {
-          this.onPreviewStreamEvent(msg);
+          this.onPreviewStreamEvent(ev);
         }
       };
 
@@ -505,6 +602,7 @@ export class ShareManager {
         bitrateKbps,
         codec,
         audioMuted: !audioEnabled,
+        audioMode,
         onPreview,
       });
 
@@ -518,6 +616,7 @@ export class ShareManager {
       }
 
       this.currentShareInfo = info;
+      this.activeAudioMode = info.audio_mode === "app" ? "app" : "system";
       this.isSharing = true;
       this.isAudioMuted = !audioEnabled;
       this.sourcesSelectionArea.classList.add("hidden");
@@ -539,11 +638,14 @@ export class ShareManager {
       }
       this.updateAudioTag();
 
-      // Configura código da sala P2P (Iroh)
-      if (info.room_ticket) {
-        this.currentRoomTicket = info.room_ticket;
+      // Configura Código Curto Blindado (LK-XXXX-XXXX) com fallback transparente para lk-...
+      this.currentShortCode = info.short_code || null;
+      this.currentRawTicket = info.room_ticket || null;
+      const preferredCode = this.currentShortCode || this.currentRawTicket;
+      if (preferredCode) {
+        this.currentRoomTicket = preferredCode;
         if (this.shareTicketInput) {
-          this.shareTicketInput.value = info.room_ticket;
+          this.shareTicketInput.value = preferredCode;
         }
         if (this.roomTicketBox) {
           this.roomTicketBox.classList.remove("hidden");
@@ -580,7 +682,15 @@ export class ShareManager {
   }
 
   public getRoomTicket(): string | null {
-    return this.currentRoomTicket;
+    return this.currentShortCode || this.currentRoomTicket || this.currentRawTicket;
+  }
+
+  public getShortCode(): string | null {
+    return this.currentShortCode;
+  }
+
+  public getRawRoomTicket(): string | null {
+    return this.currentRawTicket;
   }
 
   public getIsAudioMuted(): boolean {
@@ -643,6 +753,8 @@ export class ShareManager {
     } finally {
       this.isSharing = false;
       this.currentRoomTicket = null;
+      this.currentShortCode = null;
+      this.currentRawTicket = null;
       this.currentShareInfo = null;
       if (this.onViewersChange) {
         this.onViewersChange(0, [], "0 assistindo");

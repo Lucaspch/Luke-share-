@@ -1,12 +1,19 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { ShareManager } from "./ui/share";
-import { StreamPlayer, StreamEvent } from "./media/player";
+import {
+  StreamPlayer,
+  StreamEvent,
+  StreamChannelMsg,
+  extractBinaryBuffer,
+} from "./media/player";
 import { UpdaterManager } from "./ui/updater";
+import { FriendsUI } from "./ui/friends";
 
 interface MyInfo {
   id: string;
   nick: string;
+  tag: string;
   status: "Idle" | "Streaming" | "Watching";
 }
 
@@ -24,6 +31,7 @@ interface ActiveStream {
 class App {
   private shareManager!: ShareManager;
   private updaterManager!: UpdaterManager;
+  private friendsUI!: FriendsUI;
   private myInfo: MyInfo | null = null;
   private isMiniPlayer = false;
 
@@ -42,6 +50,7 @@ class App {
   private nickInput = document.getElementById("nick-input") as HTMLInputElement;
   private btnSaveNick = document.getElementById("btn-save-nick") as HTMLButtonElement;
   private topTicketPill = document.getElementById("top-ticket-pill") as HTMLButtonElement | null;
+  private topTicketPillLabel = document.getElementById("top-ticket-pill-label") as HTMLElement | null;
   private topViewersWrapper = document.getElementById("top-viewers-wrapper") as HTMLElement | null;
 
   // Painéis Principais do Palco
@@ -68,6 +77,13 @@ class App {
     await this.fetchMyInfo();
     this.initPeers();
     this.initShare();
+    this.friendsUI = new FriendsUI(
+      this.myInfo?.tag || "",
+      (roomTicket, hostNick) => {
+        this.startWatchingPeer(roomTicket, hostNick);
+      },
+      (msg, icon) => this.showToast(msg, icon)
+    );
     this.updaterManager = new UpdaterManager();
     this.bindEvents();
   }
@@ -111,9 +127,12 @@ class App {
     if (!this.myInfo) return;
 
     this.myIpEl.textContent = "P2P Nativo Pronto";
-    this.myIpEl.title = "Iroh P2P Nativo (Internet Direta)";
+    this.myIpEl.title = "Iroh P2P Nativo + Áudio WASAPI + IPC Binário";
 
     this.nickInput.value = this.myInfo.nick;
+    if (this.myInfo.tag && this.friendsUI) {
+      this.friendsUI.setMyTag(this.myInfo.tag);
+    }
     this.updateStatusPill();
   }
 
@@ -144,6 +163,16 @@ class App {
     }
   }
 
+  private isValidRoomCode(raw: string): boolean {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith("lk-") && trimmed.length > 16) {
+      return true;
+    }
+    const clean = trimmed.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    const body = clean.startsWith("LK") && clean.length === 10 ? clean.slice(2) : clean;
+    return /^[2-9A-HJ-NP-Z]{8}$/.test(body);
+  }
+
   private initPeers() {
     const manualIpInput = document.getElementById("manual-ip-input") as HTMLInputElement;
     const btnAddManual = document.getElementById("btn-add-manual") as HTMLButtonElement;
@@ -151,12 +180,23 @@ class App {
     const handleConnectRoom = () => {
       const val = manualIpInput.value.trim();
       if (!val) return;
-      if (!val.startsWith("lk-")) {
-        this.showToast("Código inválido. Cole um código de sala começando com lk-...", "error");
+      if (/^LK#[2-9A-HJ-NP-Z]{4}$/i.test(val)) {
+        this.showToast(
+          "Isso é uma Tag de Amigo (LK#XXXX)! Clique em 'Amigos' no topo direito para adicioná-lo.",
+          "group_add"
+        );
+        return;
+      }
+      if (!this.isValidRoomCode(val)) {
+        this.showToast(
+          "Código inválido. Digite um código curto (LK-XXXX-XXXX) ou cole o ticket (lk-...).",
+          "error"
+        );
         return;
       }
       manualIpInput.value = "";
-      this.startWatchingPeer(val, "Sala P2P");
+      const label = val.startsWith("lk-") ? "Sala P2P" : val.toUpperCase();
+      this.startWatchingPeer(val, label);
     };
 
     btnAddManual.addEventListener("click", handleConnectRoom);
@@ -179,6 +219,8 @@ class App {
         sourcePreviewPlaceholder: document.getElementById("source-preview-placeholder") as HTMLElement,
         btnRefreshPreview: document.getElementById("btn-refresh-preview") as HTMLButtonElement,
         audioCheckbox: document.getElementById("audio-enable-checkbox") as HTMLInputElement,
+        audioModeGroup: document.getElementById("audio-mode-group"),
+        audioModeSelect: document.getElementById("audio-mode-select") as HTMLSelectElement,
         btnStart: document.getElementById("btn-start-share") as HTMLButtonElement,
         btnStop: document.getElementById("btn-stop-share") as HTMLButtonElement,
         btnStopTop: document.getElementById("btn-stop-share-top") as HTMLButtonElement,
@@ -210,6 +252,8 @@ class App {
           fpsSelect: document.getElementById("modal-fps-select") as HTMLSelectElement,
           bitrateSelect: document.getElementById("modal-bitrate-select") as HTMLSelectElement,
           audioCheckbox: document.getElementById("modal-audio-enable-checkbox") as HTMLInputElement,
+          audioModeGroup: document.getElementById("modal-audio-mode-group"),
+          audioModeSelect: document.getElementById("modal-audio-mode-select") as HTMLSelectElement,
         },
       },
       (streaming) => {
@@ -219,9 +263,13 @@ class App {
           this.btnCallShare.title = "Transmitindo ao vivo (Clique para gerenciar ou encerrar sua tela)";
 
           const ticket = this.shareManager.getRoomTicket();
+          const shortCode = this.shareManager.getShortCode();
           if (this.topTicketPill && ticket) {
             this.topTicketPill.classList.remove("hidden");
-            this.topTicketPill.title = `Copiar Código da Sala: ${ticket}`;
+            if (this.topTicketPillLabel) {
+              this.topTicketPillLabel.textContent = shortCode || "Código";
+            }
+            this.topTicketPill.title = `Copiar Código: ${ticket} (Shift+Clique copia ticket lk-... completo)`;
           }
           if (this.topViewersWrapper) {
             this.topViewersWrapper.classList.remove("hidden");
@@ -238,6 +286,9 @@ class App {
           this.btnCallShare.title = "Compartilhar sua tela";
           if (this.topTicketPill) {
             this.topTicketPill.classList.add("hidden");
+            if (this.topTicketPillLabel) {
+              this.topTicketPillLabel.textContent = "Código";
+            }
           }
           if (this.topViewersWrapper) {
             this.topViewersWrapper.classList.add("hidden");
@@ -260,12 +311,16 @@ class App {
       }
     };
 
-    // Encaminha pacotes de pré-visualização para o host tile quando ativo na grade
+    // Encaminha pacotes binários diretos (IPC Binário sem Base64) para o host tile quando ativo na grade
+    this.shareManager.onPreviewBinaryFrame = (buf: ArrayBuffer) => {
+      if (this.hostTilePlayer) {
+        this.hostTilePlayer.handleBinaryVideoPacket(buf);
+      }
+    };
+
     this.shareManager.onPreviewStreamEvent = (msg: StreamEvent) => {
       if (!this.hostTilePlayer) return;
-      if (msg.t === "video") {
-        this.hostTilePlayer.handleVideoFrame(msg.d, msg.k, msg.p);
-      } else if (msg.t === "config") {
+      if (msg.t === "config") {
         if (msg.width && msg.height) {
           this.hostTilePlayer.setDimensions(msg.width, msg.height);
         }
@@ -326,23 +381,29 @@ class App {
       }
     });
 
-    // Copiar Código da Sala (Dock ou Pílula do Topo)
-    const copyRoomTicketAction = () => {
-      const ticket = this.shareManager.getRoomTicket();
+    // Copiar Código da Sala (Dock ou Pílula do Topo; Shift+Clique copia o ticket completo lk-...)
+    const copyRoomTicketAction = (ev?: MouseEvent) => {
+      const useRaw = ev?.shiftKey && this.shareManager.getRawRoomTicket();
+      const ticket = useRaw
+        ? this.shareManager.getRawRoomTicket()
+        : this.shareManager.getRoomTicket();
       if (ticket) {
         navigator.clipboard.writeText(ticket);
-        this.showToast("Código da Sala copiado para a Área de Transferência!", "content_copy");
+        const label = ticket.startsWith("LK-")
+          ? `Código curto ${ticket} copiado!`
+          : "Ticket P2P completo copiado!";
+        this.showToast(label, "content_copy");
       } else {
-        this.showToast("Inicie uma transmissão para gerar seu Código da Sala P2P", "info");
+        this.showToast("Inicie uma transmissão para gerar seu Código Curto (LK-XXXX-XXXX)", "info");
       }
     };
 
     const btnCallCopyTicket = document.getElementById("btn-call-copy-ticket") as HTMLButtonElement | null;
     if (btnCallCopyTicket) {
-      btnCallCopyTicket.addEventListener("click", copyRoomTicketAction);
+      btnCallCopyTicket.addEventListener("click", (ev) => copyRoomTicketAction(ev));
     }
     if (this.topTicketPill) {
-      this.topTicketPill.addEventListener("click", copyRoomTicketAction);
+      this.topTicketPill.addEventListener("click", (ev) => copyRoomTicketAction(ev));
     }
 
     // Círculo 2 do Dock: Mutar/Desmutar Áudio do Sistema
@@ -470,6 +531,10 @@ class App {
           <div class="spinner"></div>
           <div class="overlay-text">Conectando à transmissão...</div>
         </div>
+        <div class="tile-reconnecting-banner hidden">
+          <span class="reconnecting-dot"></span>
+          <span class="reconnecting-text">Reconectando...</span>
+        </div>
       </div>
 
       <div class="tile-top-overlay">
@@ -524,6 +589,8 @@ class App {
 
     const canvas = tile.querySelector("canvas") as HTMLCanvasElement;
     const overlay = tile.querySelector(".player-overlay") as HTMLElement;
+    const reconnectingBanner = tile.querySelector(".tile-reconnecting-banner") as HTMLElement;
+    const reconnectingText = tile.querySelector(".reconnecting-text") as HTMLElement;
     const statBadge = tile.querySelector(".tile-stat-badge") as HTMLElement;
     const volumeSlider = tile.querySelector(".tile-volume-slider") as HTMLInputElement;
     const btnMute = tile.querySelector(".btn-tile-mute") as HTMLButtonElement;
@@ -549,49 +616,66 @@ class App {
       }
     );
 
-    const onEvent = new Channel<StreamEvent>();
-    onEvent.onmessage = (msg: StreamEvent) => {
-      switch (msg.t) {
-        case "video":
-          player.handleVideoFrame(msg.d, msg.k, msg.p);
-          break;
-        case "audio":
-          player.handleAudioChunk(msg.d);
-          break;
+    const onEvent = new Channel<StreamChannelMsg>();
+    onEvent.onmessage = (msg: StreamChannelMsg) => {
+      const bin = extractBinaryBuffer(msg);
+      if (bin) {
+        player.handleBinaryVideoPacket(bin);
+        return;
+      }
+
+      const ev = msg as StreamEvent;
+      switch (ev.t) {
         case "config":
-          if (msg.width && msg.height) {
-            player.setDimensions(msg.width, msg.height);
-            currentRes = `${msg.width}x${msg.height}`;
+          if (ev.width && ev.height) {
+            player.setDimensions(ev.width, ev.height);
+            currentRes = `${ev.width}x${ev.height}`;
           }
-          if (msg.fps) {
-            currentFps = `${msg.fps} FPS`;
+          if (ev.fps) {
+            currentFps = `${ev.fps} FPS`;
           }
-          if (msg.codec) {
-            player.configureDecoder(msg.codec);
-            currentCodec = msg.codec.toUpperCase();
+          if (ev.codec) {
+            player.configureDecoder(ev.codec);
+            currentCodec = ev.codec.toUpperCase();
           }
           statBadge.textContent = `${currentRes} • ${currentFps} • ${currentCodec}`;
           break;
+        case "reconnecting":
+          reconnectingBanner.classList.remove("hidden");
+          reconnectingText.textContent = `Reconectando... (${ev.remaining_secs}s)`;
+          break;
+        case "reconnected":
+          reconnectingBanner.classList.add("hidden");
+          player.markAwaitingKeyFrame();
+          this.showToast("Conexão restaurada automaticamente!", "wifi");
+          break;
         case "viewers": {
           const wrapper = tile.querySelector(".tile-viewers-wrapper") as HTMLElement | null;
-          this.updateViewersBadge(wrapper, msg.count, msg.viewers);
+          this.updateViewersBadge(wrapper, ev.count, ev.viewers);
           break;
         }
-        case "telemetry":
-          currentFps = `${msg.fps} FPS`;
-          const fecInfo = msg.fec_recovered ? ` • FEC:${msg.fec_recovered}` : "";
-          const lossInfo = msg.loss_pct > 1 ? ` • ${msg.loss_pct.toFixed(1)}% perda` : "";
-          statBadge.textContent = `${currentRes} • ${currentFps} • ${msg.rtt_ms}ms${fecInfo}${lossInfo}`;
+        case "telemetry": {
+          if (ev.packets_rx > 0 && !reconnectingBanner.classList.contains("hidden")) {
+            reconnectingBanner.classList.add("hidden");
+          }
+          currentFps = `${ev.fps} FPS`;
+          const relayInfo = ev.via_relay ? " • Mesh P2P" : "";
+          const fecInfo = ev.fec_recovered ? ` • FEC:${ev.fec_recovered}` : "";
+          const lossInfo = ev.loss_pct > 1 ? ` • ${ev.loss_pct.toFixed(1)}% perda` : "";
+          statBadge.textContent = `${currentRes} • ${currentFps} • ${ev.rtt_ms}ms${relayInfo}${fecInfo}${lossInfo}`;
           break;
+        }
         case "ended":
           this.stopWatchingPeer(streamId);
           break;
       }
     };
 
+    // Controle de volume e mudo direto no motor WASAPI nativo em Rust
     volumeSlider.addEventListener("input", () => {
       const vol = parseFloat(volumeSlider.value);
-      player.setVolume(vol);
+      invoke("set_stream_volume", { streamId, volume: vol }).catch(() => {});
+      invoke("set_stream_muted", { streamId, muted: vol === 0 }).catch(() => {});
       btnMute.innerHTML = `<span class="material-symbols-rounded ms-sm">${
         vol === 0 ? "volume_off" : "volume_up"
       }</span>`;
@@ -803,11 +887,17 @@ class App {
       }
     }
 
-    btnCopy.addEventListener("click", () => {
-      const ticket = this.shareManager.getRoomTicket();
+    btnCopy.addEventListener("click", (ev) => {
+      const useRaw = ev.shiftKey && this.shareManager.getRawRoomTicket();
+      const ticket = useRaw
+        ? this.shareManager.getRawRoomTicket()
+        : this.shareManager.getRoomTicket();
       if (!ticket) return;
       navigator.clipboard.writeText(ticket);
-      this.showToast("Código da Sala copiado para a Área de Transferência!", "content_copy");
+      const label = ticket.startsWith("LK-")
+        ? `Código curto ${ticket} copiado!`
+        : "Ticket P2P completo copiado!";
+      this.showToast(label, "content_copy");
     });
 
     btnMute.addEventListener("click", async () => {
