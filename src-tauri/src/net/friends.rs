@@ -53,6 +53,8 @@ pub struct Friend {
     pub is_online: bool,
     #[serde(default)]
     pub is_streaming: bool,
+    #[serde(default)]
+    pub last_addr: Option<EndpointAddr>,
     #[serde(skip)]
     pub last_seen: Option<Instant>,
 }
@@ -63,6 +65,8 @@ pub struct TagCard {
     pub nick: String,
     pub pubkey_b58: String,
     pub signature_hex: String,
+    #[serde(default)]
+    pub social_addr: Option<EndpointAddr>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -81,16 +85,31 @@ pub struct FriendEnvelope {
 enum SocialWire {
     Envelope {
         env: FriendEnvelope,
+        #[serde(default)]
+        sender_addr: Option<EndpointAddr>,
+    },
+    EnvelopeAck {
+        ok: bool,
+        from_tag: String,
+        from_nick: String,
+        #[serde(default)]
+        auto_accept: Option<FriendEnvelope>,
+        #[serde(default)]
+        receiver_addr: Option<EndpointAddr>,
     },
     PresencePing {
         from_tag: String,
         from_nick: String,
         is_streaming: bool,
+        #[serde(default)]
+        sender_addr: Option<EndpointAddr>,
     },
     PresencePong {
         from_tag: String,
         from_nick: String,
         is_streaming: bool,
+        #[serde(default)]
+        responder_addr: Option<EndpointAddr>,
     },
     KnockRequest {
         request_id: String,
@@ -361,11 +380,13 @@ impl FriendsManager {
         msg.extend_from_slice(my_nick.as_bytes());
 
         let sig = self.signing_key.sign(&msg);
+        let social_addr = self.social_endpoint.lock().as_ref().map(|ep| ep.addr());
         TagCard {
             tag: self.tag.clone(),
             nick: my_nick.to_string(),
             pubkey_b58: pub_b58,
             signature_hex: hex::encode(sig.to_bytes()),
+            social_addr,
         }
     }
 
@@ -481,6 +502,12 @@ impl FriendsManager {
                         toast = Some(format!("Amizade mútua confirmada com {} ({})!", env.from_nick, env.from_tag));
                     } else if existing.status == FriendStatus::PendingIn {
                         existing.nick = env.from_nick.clone();
+                        existing.public_key_b58 = env.from_pubkey_b58.clone();
+                    } else if existing.status == FriendStatus::Accepted {
+                        existing.nick = env.from_nick.clone();
+                        existing.public_key_b58 = env.from_pubkey_b58.clone();
+                        existing.is_online = true;
+                        existing.last_seen = Some(Instant::now());
                     }
                 } else {
                     lock.insert(
@@ -492,6 +519,7 @@ impl FriendsManager {
                             status: FriendStatus::PendingIn,
                             is_online: true,
                             is_streaming: false,
+                            last_addr: None,
                             last_seen: Some(Instant::now()),
                         },
                     );
@@ -540,6 +568,29 @@ impl FriendsManager {
         Ok(toast)
     }
 
+    fn maybe_build_auto_accept(&self, peer_tag: &str, my_nick: &str) -> Option<FriendEnvelope> {
+        let is_accepted = {
+            let lock = self.friends.read();
+            lock.get(peer_tag)
+                .map(|f| f.status == FriendStatus::Accepted)
+                .unwrap_or(false)
+        };
+        if is_accepted {
+            Some(self.sign_envelope(peer_tag, my_nick, "friend_accept"))
+        } else {
+            None
+        }
+    }
+
+    fn update_friend_addr(&self, tag: &str, addr: Option<EndpointAddr>) {
+        if let Some(addr) = addr {
+            let mut lock = self.friends.write();
+            if let Some(f) = lock.get_mut(tag) {
+                f.last_addr = Some(addr);
+            }
+        }
+    }
+
     /// Inicia os daemons P2P de Identidade Social (`LUKE_SOCIAL_ALPN`) e Descoberta de Tag (`LUKE_TAG_ALPN`).
     pub fn start_daemons(
         self: &Arc<Self>,
@@ -551,14 +602,22 @@ impl FriendsManager {
         let ticket_fn = get_active_ticket.clone();
 
         tauri::async_runtime::spawn(async move {
-            // 1. Endpoint Pessoal Permanente (usa a própria chave Ed25519 identity.key!)
+            // 1. Inicializa simultaneamente Endpoint Social (`identity.key`) e Endpoint de Tag (`LK#XXXX`)
             let secret = SecretKey::from_bytes(&mgr.signing_key.to_bytes());
-            let social_ep = match Endpoint::builder(presets::N0)
-                .secret_key(secret)
-                .alpns(vec![LUKE_SOCIAL_ALPN.to_vec()])
-                .bind()
-                .await
-            {
+            let tag_seed = derive_tag_discovery_seed(&mgr.tag);
+
+            let (social_res, tag_res) = tokio::join!(
+                Endpoint::builder(presets::N0)
+                    .secret_key(secret)
+                    .alpns(vec![LUKE_SOCIAL_ALPN.to_vec()])
+                    .bind(),
+                Endpoint::builder(presets::N0)
+                    .secret_key(SecretKey::from_bytes(&tag_seed))
+                    .alpns(vec![LUKE_TAG_ALPN.to_vec()])
+                    .bind()
+            );
+
+            let social_ep = match social_res {
                 Ok(ep) => ep,
                 Err(e) => {
                     tracing::warn!("friends: falha ao iniciar endpoint social P2P: {e:#}");
@@ -567,37 +626,67 @@ impl FriendsManager {
             };
             *mgr.social_endpoint.lock() = Some(social_ep.clone());
 
-            // 2. Endpoint de Descoberta por Tag Curta (LK#XXXX -> TagCard assinado)
-            let tag_seed = derive_tag_discovery_seed(&mgr.tag);
-            if let Ok(tag_ep) = Endpoint::builder(presets::N0)
-                .secret_key(SecretKey::from_bytes(&tag_seed))
-                .alpns(vec![LUKE_TAG_ALPN.to_vec()])
-                .bind()
-                .await
-            {
+            // Aguarda ambos conectarem ao Home Relay antes de anunciar para garantir RelayUrl imediato no Pkarr
+            if let Ok(ref tag_ep) = tag_res {
+                let _ = tokio::time::timeout(Duration::from_secs(4), async {
+                    tokio::join!(social_ep.online(), tag_ep.online());
+                })
+                .await;
+            } else {
+                let _ = tokio::time::timeout(Duration::from_secs(4), social_ep.online()).await;
+            }
+
+            // 2. Servidor de Descoberta + Entrega Direta em 1 Hop (`LUKE_TAG_ALPN`)
+            if let Ok(tag_ep) = tag_res {
                 *mgr.tag_endpoint.lock() = Some(tag_ep.clone());
                 let mgr_tag = mgr.clone();
                 let nick_tag = nick_fn.clone();
                 tokio::spawn(async move {
-                    let _ = tokio::time::timeout(Duration::from_secs(3), tag_ep.online()).await;
                     while !mgr_tag.stop.load(Ordering::SeqCst) {
-                        if let Some(inc) = tag_ep.accept().await {
-                            let card = mgr_tag.build_signed_tag_card(&nick_tag());
-                            tokio::spawn(async move {
-                                if let Ok(conn) = inc.await {
-                                    if let Ok((mut send, _recv)) = conn.accept_bi().await {
-                                        if let Ok(bytes) = serde_json::to_vec(&card) {
-                                            let _ = send.write_all(&(bytes.len() as u32).to_be_bytes()).await;
-                                            let _ = send.write_all(&bytes).await;
-                                            let _ = send.finish();
-                                            let _ = tokio::time::timeout(Duration::from_secs(2), conn.closed()).await;
-                                        }
+                        let Some(inc) = tag_ep.accept().await else { break };
+                        let mgr_conn = mgr_tag.clone();
+                        let my_nick = nick_tag();
+                        tokio::spawn(async move {
+                            let Ok(conn) = inc.await else { return };
+                            let remote_pk_bytes = *conn.remote_id().as_bytes();
+                            let Ok((mut send, mut recv)) = conn.accept_bi().await else { return };
+
+                            // Passo 1: Envia TagCard assinado (com social_addr já preenchido!)
+                            let card = mgr_conn.build_signed_tag_card(&my_nick);
+                            if let Ok(bytes) = serde_json::to_vec(&card) {
+                                let _ = send.write_all(&(bytes.len() as u32).to_be_bytes()).await;
+                                let _ = send.write_all(&bytes).await;
+                                let _ = send.flush().await;
+                            }
+
+                            // Passo 2: Aceita opcionalmente o FriendEnvelope já na mesma conexão QUIC!
+                            if let Ok(Ok(SocialWire::Envelope { env, sender_addr })) =
+                                tokio::time::timeout(Duration::from_secs(3), read_wire(&mut recv)).await
+                            {
+                                let remote_b58 = bs58::encode(remote_pk_bytes).into_string();
+                                let mut ok = false;
+                                let mut auto_accept = None;
+                                if remote_b58 == env.from_pubkey_b58 && mgr_conn.verify_and_apply_envelope(&env).is_ok() {
+                                    mgr_conn.update_friend_addr(&env.from_tag, sender_addr);
+                                    ok = true;
+                                    if env.action == "friend_request" {
+                                        auto_accept = mgr_conn.maybe_build_auto_accept(&env.from_tag, &my_nick);
                                     }
                                 }
-                            });
-                        } else {
-                            break;
-                        }
+                                let ack = SocialWire::EnvelopeAck {
+                                    ok,
+                                    from_tag: mgr_conn.tag.clone(),
+                                    from_nick: my_nick.clone(),
+                                    auto_accept,
+                                    receiver_addr: mgr_conn.social_endpoint.lock().as_ref().map(|e| e.addr()),
+                                };
+                                let _ = write_wire(&mut send, &ack).await;
+                            }
+
+                            let _ = send.finish();
+                            let _ = tokio::time::timeout(Duration::from_secs(3), send.stopped()).await;
+                            let _ = tokio::time::timeout(Duration::from_secs(2), conn.closed()).await;
+                        });
                     }
                 });
             }
@@ -616,16 +705,16 @@ impl FriendsManager {
                 });
             }
 
-            let _ = tokio::time::timeout(Duration::from_secs(3), social_ep.online()).await;
             tracing::info!("friends: Identidade {} online na rede P2P Iroh!", mgr.tag);
 
-            // 3. Loop de sincronização periódica (Presença P2P direta + retry de pedidos pendentes)
+            // 3. Loop rápido de sincronização periódica (5s) + disparo inicial em 1.5s
             let mgr_hb = mgr.clone();
             let nick_hb = nick_fn.clone();
             let ticket_hb = ticket_fn.clone();
             let ep_hb = social_ep.clone();
             tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(10));
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                let mut interval = tokio::time::interval(Duration::from_secs(5));
                 while !mgr_hb.stop.load(Ordering::SeqCst) {
                     interval.tick().await;
                     let my_nick = nick_hb();
@@ -656,6 +745,8 @@ impl FriendsManager {
                             ticket_conn(),
                         )
                         .await;
+                    let _ = send.finish();
+                    let _ = tokio::time::timeout(Duration::from_secs(3), send.stopped()).await;
                     let _ = tokio::time::timeout(Duration::from_secs(2), conn.closed()).await;
                 });
             }
@@ -671,17 +762,32 @@ impl FriendsManager {
         my_active_ticket: Option<String>,
     ) {
         match wire {
-            SocialWire::Envelope { env } => {
+            SocialWire::Envelope { env, sender_addr } => {
                 // Garante que quem abriu o TLS 1.3 QUIC é de fato dono da chave do envelope!
                 let remote_b58 = bs58::encode(remote_pk_bytes).into_string();
-                if remote_b58 == env.from_pubkey_b58 {
-                    let _ = self.verify_and_apply_envelope(&env);
+                let mut ok = false;
+                let mut auto_accept = None;
+                if remote_b58 == env.from_pubkey_b58 && self.verify_and_apply_envelope(&env).is_ok() {
+                    self.update_friend_addr(&env.from_tag, sender_addr);
+                    ok = true;
+                    if env.action == "friend_request" {
+                        auto_accept = self.maybe_build_auto_accept(&env.from_tag, my_nick);
+                    }
                 }
+                let ack = SocialWire::EnvelopeAck {
+                    ok,
+                    from_tag: self.tag.clone(),
+                    from_nick: my_nick.to_string(),
+                    auto_accept,
+                    receiver_addr: self.social_endpoint.lock().as_ref().map(|e| e.addr()),
+                };
+                let _ = write_wire(send, &ack).await;
             }
             SocialWire::PresencePing {
                 from_tag,
                 from_nick,
                 is_streaming,
+                sender_addr,
             } => {
                 let remote_b58 = bs58::encode(remote_pk_bytes).into_string();
                 let is_accepted_friend = {
@@ -691,6 +797,9 @@ impl FriendsManager {
                             f.nick = from_nick;
                             f.is_online = true;
                             f.is_streaming = is_streaming;
+                            if sender_addr.is_some() {
+                                f.last_addr = sender_addr;
+                            }
                             f.last_seen = Some(Instant::now());
                             true
                         } else {
@@ -706,6 +815,7 @@ impl FriendsManager {
                         from_tag: self.tag.clone(),
                         from_nick: my_nick.to_string(),
                         is_streaming: my_active_ticket.is_some(),
+                        responder_addr: self.social_endpoint.lock().as_ref().map(|e| e.addr()),
                     };
                     let _ = write_wire(send, &pong).await;
                 }
@@ -801,15 +911,113 @@ impl FriendsManager {
         }
     }
 
-    async fn resolve_tag_card(&self, target_tag: &str) -> Result<TagCard> {
+    async fn resolve_and_deliver_via_tag(
+        &self,
+        target_tag: &str,
+        env_opt: Option<&FriendEnvelope>,
+    ) -> Result<(TagCard, bool)> {
+        let seed = derive_tag_discovery_seed(target_tag);
+        let target_id = SecretKey::from_bytes(&seed).public();
+
+        let existing_ep = self.social_endpoint.lock().clone();
+        let temp_ep = if existing_ep.is_none() {
+            let ep = Endpoint::builder(presets::N0)
+                .secret_key(SecretKey::from_bytes(&self.signing_key.to_bytes()))
+                .bind()
+                .await?;
+            let _ = tokio::time::timeout(Duration::from_millis(2500), ep.online()).await;
+            Some(ep)
+        } else {
+            None
+        };
+        let ep = existing_ep.as_ref().or(temp_ep.as_ref()).unwrap();
+        let my_sender_addr = Some(ep.addr());
+
+        let res = async {
+            let conn = tokio::time::timeout(
+                Duration::from_secs(10),
+                ep.connect(EndpointAddr::from(target_id), LUKE_TAG_ALPN),
+            )
+            .await
+            .map_err(|_| {
+                anyhow!("Amigo offline no momento (pedido ficará pendente e será entregue automaticamente)")
+            })??;
+
+            let (mut send, mut recv) = conn.open_bi().await?;
+
+            // CRÍTICO (RFC 9000 QUIC): escreve no `send` + `finish()` ANTES de ler do `recv`,
+            // pois `open_bi()` só materializa o stream no `accept_bi()` remoto ao transmitir o primeiro frame STREAM!
+            if let Some(env) = env_opt {
+                write_wire(
+                    &mut send,
+                    &SocialWire::Envelope {
+                        env: env.clone(),
+                        sender_addr: my_sender_addr,
+                    },
+                )
+                .await?;
+            } else {
+                let _ = send.write_all(&0u32.to_be_bytes()).await;
+            }
+            let _ = send.finish();
+
+            let mut len_buf = [0u8; 4];
+            tokio::time::timeout(Duration::from_secs(6), recv.read_exact(&mut len_buf))
+                .await
+                .map_err(|_| anyhow!("Tempo esgotado lendo TagCard"))??;
+            let len = u32::from_be_bytes(len_buf) as usize;
+            if len == 0 || len > 16 * 1024 {
+                anyhow::bail!("TagCard inválido");
+            }
+            let mut buf = vec![0u8; len];
+            tokio::time::timeout(Duration::from_secs(6), recv.read_exact(&mut buf))
+                .await
+                .map_err(|_| anyhow!("Tempo esgotado lendo payload do TagCard"))??;
+
+            let card: TagCard = serde_json::from_slice(&buf)?;
+            Self::verify_tag_card(&card)?;
+
+            let mut delivered = false;
+            if env_opt.is_some() {
+                if let Ok(Ok(SocialWire::EnvelopeAck {
+                    ok,
+                    auto_accept,
+                    receiver_addr,
+                    ..
+                })) = tokio::time::timeout(Duration::from_secs(4), read_wire(&mut recv)).await
+                {
+                    if let Some(addr) = receiver_addr {
+                        self.update_friend_addr(&card.tag, Some(addr));
+                    }
+                    if let Some(acc_env) = auto_accept {
+                        let _ = self.verify_and_apply_envelope(&acc_env);
+                    }
+                    delivered = ok;
+                }
+            }
+
+            conn.close(0u32.into(), b"ok");
+            Ok::<(TagCard, bool), anyhow::Error>((card, delivered))
+        }
+        .await;
+
+        if let Some(t) = temp_ep {
+            let _ = t.close().await;
+        }
+
+        if let Ok(pair) = res {
+            return Ok(pair);
+        }
+
+        // Fallback via Cloudflare Worker se configurado
         if let Some(worker_url) = configured_worker_url() {
-            if let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(3)).build() {
+            if let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(4)).build() {
                 let encoded = target_tag.replace('#', "%23");
                 if let Ok(resp) = client.get(format!("{worker_url}/v1/tag/{encoded}")).send().await {
                     if resp.status().is_success() {
                         if let Ok(card) = resp.json::<TagCard>().await {
                             if Self::verify_tag_card(&card).is_ok() {
-                                return Ok(card);
+                                return Ok((card, false));
                             }
                         }
                     }
@@ -817,39 +1025,15 @@ impl FriendsManager {
             }
         }
 
-        let seed = derive_tag_discovery_seed(target_tag);
-        let target_id = SecretKey::from_bytes(&seed).public();
-        let ep = Endpoint::builder(presets::N0).bind().await?;
-        let res = async {
-            let conn = tokio::time::timeout(
-                Duration::from_secs(6),
-                ep.connect(EndpointAddr::from(target_id), LUKE_TAG_ALPN),
-            )
-            .await
-            .map_err(|_| anyhow!("Amigo offline no momento (pedido ficará pendente e será entregue automaticamente)"))??;
-
-            let (mut send, mut recv) = conn.open_bi().await?;
-            let _ = send.finish();
-
-            let mut len_buf = [0u8; 4];
-            recv.read_exact(&mut len_buf).await?;
-            let len = u32::from_be_bytes(len_buf) as usize;
-            if len == 0 || len > 16 * 1024 {
-                anyhow::bail!("TagCard inválido");
-            }
-            let mut buf = vec![0u8; len];
-            recv.read_exact(&mut buf).await?;
-            conn.close(0u32.into(), b"ok");
-            let card: TagCard = serde_json::from_slice(&buf)?;
-            Self::verify_tag_card(&card)?;
-            Ok::<TagCard, anyhow::Error>(card)
-        }
-        .await;
-        let _ = ep.close().await;
         res
     }
 
-    async fn send_envelope_p2p(&self, pubkey_b58: &str, env: &FriendEnvelope, addr_override: Option<EndpointAddr>) -> Result<()> {
+    async fn send_envelope_p2p(
+        &self,
+        pubkey_b58: &str,
+        env: &FriendEnvelope,
+        addr_override: Option<EndpointAddr>,
+    ) -> Result<()> {
         // Envia também ao Cloudflare Worker se configurado (caixa postal offline)
         if let Some(worker_url) = configured_worker_url() {
             let env_cf = env.clone();
@@ -865,31 +1049,88 @@ impl FriendsManager {
             .try_into()
             .map_err(|_| anyhow!("Chave pública do amigo inválida"))?;
         let remote_id = PublicKey::from_bytes(&pk_arr)?;
-        let target = addr_override.unwrap_or_else(|| EndpointAddr::from(remote_id));
 
-        let ep_opt = self.social_endpoint.lock().clone();
-        let temp_ep;
-        let ep = if let Some(ref existing) = ep_opt {
-            existing
-        } else {
-            temp_ep = Endpoint::builder(presets::N0)
+        let existing_ep = self.social_endpoint.lock().clone();
+        let temp_ep = if existing_ep.is_none() {
+            let ep = Endpoint::builder(presets::N0)
                 .secret_key(SecretKey::from_bytes(&self.signing_key.to_bytes()))
                 .bind()
                 .await?;
-            &temp_ep
+            let _ = tokio::time::timeout(Duration::from_millis(2500), ep.online()).await;
+            Some(ep)
+        } else {
+            None
         };
+        let ep = existing_ep.as_ref().or(temp_ep.as_ref()).unwrap();
+        let my_sender_addr = Some(ep.addr());
 
-        let conn = tokio::time::timeout(
-            Duration::from_secs(6),
-            ep.connect(target, LUKE_SOCIAL_ALPN),
-        )
-        .await
-        .map_err(|_| anyhow!("Tempo esgotado conectando ao amigo via P2P"))??;
+        let res = async {
+            // Tenta rota conhecida primeiro (`social_addr` / `last_addr`), com fallback automático para Pkarr
+            let conn = if let Some(hint) = addr_override {
+                match tokio::time::timeout(Duration::from_secs(6), ep.connect(hint, LUKE_SOCIAL_ALPN)).await {
+                    Ok(Ok(c)) => c,
+                    _ => tokio::time::timeout(
+                        Duration::from_secs(8),
+                        ep.connect(EndpointAddr::from(remote_id), LUKE_SOCIAL_ALPN),
+                    )
+                    .await
+                    .map_err(|_| anyhow!("Tempo esgotado conectando ao amigo via P2P"))??,
+                }
+            } else {
+                tokio::time::timeout(
+                    Duration::from_secs(9),
+                    ep.connect(EndpointAddr::from(remote_id), LUKE_SOCIAL_ALPN),
+                )
+                .await
+                .map_err(|_| anyhow!("Tempo esgotado conectando ao amigo via P2P"))??
+            };
 
-        let (mut send, _recv) = conn.open_bi().await?;
-        write_wire(&mut send, &SocialWire::Envelope { env: env.clone() }).await?;
-        let _ = send.finish();
-        Ok(())
+            let (mut send, mut recv) = conn.open_bi().await?;
+            write_wire(
+                &mut send,
+                &SocialWire::Envelope {
+                    env: env.clone(),
+                    sender_addr: my_sender_addr,
+                },
+            )
+            .await?;
+            let _ = send.finish();
+
+            // CRÍTICO: Aguarda confirmação de leitura (`EnvelopeAck`) antes de fechar a conexão QUIC!
+            // Caso contrário, o Drop de `Connection` envia CONNECTION_CLOSE imediato e aborta o stream em trânsito.
+            match tokio::time::timeout(Duration::from_secs(6), read_wire(&mut recv)).await {
+                Ok(Ok(SocialWire::EnvelopeAck {
+                    ok,
+                    auto_accept,
+                    receiver_addr,
+                    from_tag,
+                    ..
+                })) => {
+                    if let Some(addr) = receiver_addr {
+                        self.update_friend_addr(&from_tag, Some(addr));
+                    }
+                    if let Some(acc_env) = auto_accept {
+                        let _ = self.verify_and_apply_envelope(&acc_env);
+                    }
+                    conn.close(0u32.into(), b"ack");
+                    if !ok {
+                        anyhow::bail!("Envelope rejeitado pelo destinatário");
+                    }
+                }
+                _ => {
+                    // Compatibilidade com nós v0.5.0: aguarda o par drenar/fechar o stream antes de dropar `conn`
+                    let _ = tokio::time::timeout(Duration::from_millis(2500), send.stopped()).await;
+                    conn.close(0u32.into(), b"done");
+                }
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        if let Some(t) = temp_ep {
+            let _ = t.close().await;
+        }
+        res
     }
 
     pub async fn send_friend_request(&self, raw_tag: &str, my_nick: &str) -> Result<String> {
@@ -923,6 +1164,7 @@ impl FriendsManager {
                 status: FriendStatus::PendingOut,
                 is_online: false,
                 is_streaming: false,
+                last_addr: None,
                 last_seen: None,
             });
         }
@@ -930,21 +1172,44 @@ impl FriendsManager {
 
         let env = self.sign_envelope(&target_tag, my_nick, "friend_request");
 
-        match self.resolve_tag_card(&target_tag).await {
-            Ok(card) => {
+        match self.resolve_and_deliver_via_tag(&target_tag, Some(&env)).await {
+            Ok((card, delivered_via_tag)) => {
                 {
                     let mut lock = self.friends.write();
                     if let Some(f) = lock.get_mut(&target_tag) {
                         f.nick = card.nick.clone();
                         f.public_key_b58 = card.pubkey_b58.clone();
+                        if card.social_addr.is_some() {
+                            f.last_addr = card.social_addr.clone();
+                        }
                     }
                 }
                 self.save_friends();
-                let _ = self.send_envelope_p2p(&card.pubkey_b58, &env, None).await;
-                Ok(format!(
-                    "Pedido enviado para {} ({target_tag})! Aguardando confirmação.",
-                    card.nick
-                ))
+
+                if !delivered_via_tag {
+                    let _ = self
+                        .send_envelope_p2p(&card.pubkey_b58, &env, card.social_addr.clone())
+                        .await;
+                }
+
+                let now_accepted = self
+                    .friends
+                    .read()
+                    .get(&target_tag)
+                    .map(|f| f.status == FriendStatus::Accepted)
+                    .unwrap_or(false);
+
+                if now_accepted {
+                    Ok(format!(
+                        "Amizade mútua confirmada com {} ({target_tag})!",
+                        card.nick
+                    ))
+                } else {
+                    Ok(format!(
+                        "Pedido entregue para {} ({target_tag})! Aguardando confirmação.",
+                        card.nick
+                    ))
+                }
             }
             Err(_) => {
                 // Se Worker estiver ativo, tenta deixar na inbox mesmo sem P2P imediato
@@ -954,7 +1219,7 @@ impl FriendsManager {
                     }
                 }
                 Ok(format!(
-                    "Pedido salvo para {target_tag}! Será entregue automaticamente assim que ele ficar online."
+                    "Pedido salvo para {target_tag}! Será entregue automaticamente em segundos assim que ele estiver online."
                 ))
             }
         }
@@ -962,17 +1227,20 @@ impl FriendsManager {
 
     pub async fn respond_friend_request(&self, friend_tag: &str, accept: bool, my_nick: &str) -> Result<()> {
         let norm = normalize_tag(friend_tag)?;
-        let pubkey_opt = {
+        let (pubkey_opt, addr_opt) = {
             let mut lock = self.friends.write();
             if accept {
                 if let Some(f) = lock.get_mut(&norm) {
                     f.status = FriendStatus::Accepted;
-                    Some(f.public_key_b58.clone())
+                    (Some(f.public_key_b58.clone()), f.last_addr.clone())
                 } else {
-                    None
+                    (None, None)
                 }
             } else {
-                lock.remove(&norm).map(|f| f.public_key_b58)
+                match lock.remove(&norm) {
+                    Some(f) => (Some(f.public_key_b58), f.last_addr),
+                    None => (None, None),
+                }
             }
         };
         self.save_friends();
@@ -981,7 +1249,7 @@ impl FriendsManager {
             if !pk.is_empty() {
                 let action = if accept { "friend_accept" } else { "friend_reject" };
                 let env = self.sign_envelope(&norm, my_nick, action);
-                let _ = self.send_envelope_p2p(&pk, &env, None).await;
+                let _ = self.send_envelope_p2p(&pk, &env, addr_opt).await;
             }
         }
         Ok(())
@@ -1020,7 +1288,6 @@ impl FriendsManager {
             .try_into()
             .map_err(|_| anyhow!("Chave pública corrompida"))?;
         let remote_id = PublicKey::from_bytes(&pk_arr)?;
-        let target = addr_override.unwrap_or_else(|| EndpointAddr::from(remote_id));
 
         let ep_opt = self.social_endpoint.lock().clone();
         let temp_ep;
@@ -1031,15 +1298,29 @@ impl FriendsManager {
                 .secret_key(SecretKey::from_bytes(&self.signing_key.to_bytes()))
                 .bind()
                 .await?;
+            let _ = tokio::time::timeout(Duration::from_millis(2500), temp_ep.online()).await;
             &temp_ep
         };
 
-        let conn = tokio::time::timeout(
-            Duration::from_secs(8),
-            ep.connect(target, LUKE_SOCIAL_ALPN),
-        )
-        .await
-        .map_err(|_| anyhow!("Não foi possível alcançar {}. Verifique se ele está online.", friend.nick))??;
+        let hint = addr_override.or(friend.last_addr);
+        let conn = if let Some(h) = hint {
+            match tokio::time::timeout(Duration::from_secs(6), ep.connect(h, LUKE_SOCIAL_ALPN)).await {
+                Ok(Ok(c)) => c,
+                _ => tokio::time::timeout(
+                    Duration::from_secs(8),
+                    ep.connect(EndpointAddr::from(remote_id), LUKE_SOCIAL_ALPN),
+                )
+                .await
+                .map_err(|_| anyhow!("Não foi possível alcançar {}. Verifique se ele está online.", friend.nick))??,
+            }
+        } else {
+            tokio::time::timeout(
+                Duration::from_secs(8),
+                ep.connect(EndpointAddr::from(remote_id), LUKE_SOCIAL_ALPN),
+            )
+            .await
+            .map_err(|_| anyhow!("Não foi possível alcançar {}. Verifique se ele está online.", friend.nick))??
+        };
 
         let (mut send, mut recv) = conn.open_bi().await?;
         let req_id = Uuid::new_v4().to_string();
@@ -1052,10 +1333,12 @@ impl FriendsManager {
             },
         )
         .await?;
+        let _ = send.finish();
 
         let resp = tokio::time::timeout(Duration::from_secs(33), read_wire(&mut recv))
             .await
             .map_err(|_| anyhow!("Tempo esgotado aguardando resposta de {}.", friend.nick))??;
+        conn.close(0u32.into(), b"ok");
 
         match resp {
             SocialWire::KnockDecision {
@@ -1113,17 +1396,33 @@ impl FriendsManager {
                 FriendStatus::PendingOut => {
                     let env = self.sign_envelope(&f.tag, my_nick, "friend_request");
                     if !f.public_key_b58.is_empty() {
-                        let _ = self.send_envelope_p2p(&f.public_key_b58, &env, None).await;
-                    } else if let Ok(card) = self.resolve_tag_card(&f.tag).await {
+                        if self
+                            .send_envelope_p2p(&f.public_key_b58, &env, f.last_addr.clone())
+                            .await
+                            .is_err()
+                        {
+                            // Tenta também via endpoint de Tag caso o amigo tenha acabado de abrir o app
+                            let _ = self.resolve_and_deliver_via_tag(&f.tag, Some(&env)).await;
+                        }
+                    } else if let Ok((card, delivered)) =
+                        self.resolve_and_deliver_via_tag(&f.tag, Some(&env)).await
+                    {
                         {
                             let mut lock = self.friends.write();
                             if let Some(entry) = lock.get_mut(&f.tag) {
                                 entry.nick = card.nick.clone();
                                 entry.public_key_b58 = card.pubkey_b58.clone();
+                                if card.social_addr.is_some() {
+                                    entry.last_addr = card.social_addr.clone();
+                                }
                             }
                         }
                         self.save_friends();
-                        let _ = self.send_envelope_p2p(&card.pubkey_b58, &env, None).await;
+                        if !delivered {
+                            let _ = self
+                                .send_envelope_p2p(&card.pubkey_b58, &env, card.social_addr)
+                                .await;
+                        }
                     }
                 }
                 FriendStatus::Accepted if !f.public_key_b58.is_empty() => {
@@ -1136,14 +1435,33 @@ impl FriendsManager {
                     let nick = my_nick.to_string();
                     let friends_arc = self.friends.clone();
                     let f_tag = f.tag.clone();
+                    let f_hint = f.last_addr.clone();
 
                     tokio::spawn(async move {
                         let ping_res = async {
-                            let conn = tokio::time::timeout(
-                                Duration::from_millis(2500),
-                                ep_clone.connect(EndpointAddr::from(remote_id), LUKE_SOCIAL_ALPN),
-                            )
-                            .await??;
+                            let my_addr = Some(ep_clone.addr());
+                            let conn = if let Some(hint) = f_hint {
+                                match tokio::time::timeout(
+                                    Duration::from_millis(3500),
+                                    ep_clone.connect(hint, LUKE_SOCIAL_ALPN),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(c)) => c,
+                                    _ => tokio::time::timeout(
+                                        Duration::from_millis(4500),
+                                        ep_clone.connect(EndpointAddr::from(remote_id), LUKE_SOCIAL_ALPN),
+                                    )
+                                    .await??,
+                                }
+                            } else {
+                                tokio::time::timeout(
+                                    Duration::from_millis(4500),
+                                    ep_clone.connect(EndpointAddr::from(remote_id), LUKE_SOCIAL_ALPN),
+                                )
+                                .await??
+                            };
+
                             let (mut send, mut recv) = conn.open_bi().await?;
                             write_wire(
                                 &mut send,
@@ -1151,10 +1469,12 @@ impl FriendsManager {
                                     from_tag: my_tag,
                                     from_nick: nick,
                                     is_streaming: am_streaming,
+                                    sender_addr: my_addr,
                                 },
                             )
                             .await?;
-                            let pong = tokio::time::timeout(Duration::from_millis(2000), read_wire(&mut recv)).await??;
+                            let _ = send.finish();
+                            let pong = tokio::time::timeout(Duration::from_millis(3500), read_wire(&mut recv)).await??;
                             conn.close(0u32.into(), b"ok");
                             Ok::<SocialWire, anyhow::Error>(pong)
                         }
@@ -1163,6 +1483,7 @@ impl FriendsManager {
                         if let Ok(SocialWire::PresencePong {
                             from_nick,
                             is_streaming,
+                            responder_addr,
                             ..
                         }) = ping_res
                         {
@@ -1171,6 +1492,9 @@ impl FriendsManager {
                                 entry.nick = from_nick;
                                 entry.is_online = true;
                                 entry.is_streaming = is_streaming;
+                                if responder_addr.is_some() {
+                                    entry.last_addr = responder_addr;
+                                }
                                 entry.last_seen = Some(Instant::now());
                             }
                         }
@@ -1227,6 +1551,7 @@ mod tests {
                     status: FriendStatus::PendingOut,
                     is_online: true,
                     is_streaming: false,
+                    last_addr: None,
                     last_seen: Some(Instant::now()),
                 },
             );
@@ -1296,6 +1621,75 @@ mod tests {
 
         let _ = srv_handle.await;
         let _ = alice_ep.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn real_internet_pkarr_friend_request_and_accept_e2e() -> Result<()> {
+        let alice = FriendsManager::ephemeral_for_test();
+        let bob = FriendsManager::ephemeral_for_test();
+
+        alice.start_daemons(Arc::new(|| "AliceReal".to_string()), Arc::new(|| None));
+        bob.start_daemons(
+            Arc::new(|| "BobReal".to_string()),
+            Arc::new(|| Some("lk-live-room".to_string())),
+        );
+
+        // Aguarda ambos publicarem no Pkarr/Relay real do Iroh
+        for _ in 0..40 {
+            let a_ready = alice.social_endpoint.lock().is_some() && alice.tag_endpoint.lock().is_some();
+            let b_ready = bob.social_endpoint.lock().is_some() && bob.tag_endpoint.lock().is_some();
+            if a_ready && b_ready {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        // 1. Alice adiciona Bob APENAS pela tag LK#XXXX (zero addr_override!)
+        let msg = alice.send_friend_request(&bob.tag, "AliceReal").await?;
+        println!("Alice send_friend_request -> {msg}");
+
+        // Aguarda até 6s caso precise de 1 retry ciclo, mas na entrega em 1 hop já chega na hora!
+        let mut bob_received = false;
+        for _ in 0..30 {
+            let list = bob.list_friends();
+            if list
+                .iter()
+                .any(|f| f.tag == alice.tag && f.status == FriendStatus::PendingIn)
+            {
+                bob_received = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert!(
+            bob_received,
+            "Bob DEVE receber o pedido PendingIn de Alice via rede P2P real!"
+        );
+
+        // 2. Bob clica em Aceitar -> Alice DEVE transicionar para Accepted via P2P real!
+        bob.respond_friend_request(&alice.tag, true, "BobReal").await?;
+
+        let mut alice_accepted = false;
+        for _ in 0..30 {
+            let list = alice.list_friends();
+            if list
+                .iter()
+                .any(|f| f.tag == bob.tag && f.status == FriendStatus::Accepted)
+            {
+                alice_accepted = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert!(
+            alice_accepted,
+            "Alice DEVE receber a confirmação Accepted de Bob via rede P2P real!"
+        );
+
+        alice.stop.store(true, Ordering::SeqCst);
+        bob.stop.store(true, Ordering::SeqCst);
         Ok(())
     }
 }

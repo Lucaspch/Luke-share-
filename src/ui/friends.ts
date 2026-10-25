@@ -32,6 +32,7 @@ export class FriendsUI {
   private friends: Friend[] = [];
   private knockingTags = new Set<string>();
   private activeKnockCards = new Map<string, HTMLElement>();
+  private shownFriendReqCards = new Map<string, HTMLElement>();
 
   private btnToggle: HTMLButtonElement | null;
   private popover: HTMLElement | null;
@@ -249,8 +250,84 @@ export class FriendsUI {
     }, 30000);
   }
 
+  private renderIncomingFriendReqCard(req: Friend) {
+    if (!this.knockContainer || this.shownFriendReqCards.has(req.tag)) return;
+
+    const card = document.createElement("div");
+    card.className = "knock-toast-card";
+    card.innerHTML = `
+      <div class="knock-toast-top">
+        <div class="knock-avatar">
+          <span class="material-symbols-rounded ms-sm">person_add</span>
+        </div>
+        <div class="knock-info">
+          <div class="knock-title">
+            <strong>${this.escapeHtml(req.nick)}</strong>
+            <span class="knock-tag">${this.escapeHtml(req.tag)}</span>
+          </div>
+          <div class="knock-subtitle">Enviou um pedido de amizade para você</div>
+        </div>
+      </div>
+      <div class="knock-actions">
+        <button class="btn-knock-reject" type="button">
+          <span class="material-symbols-rounded ms-xs">close</span>
+          <span>Recusar</span>
+        </button>
+        <button class="btn-knock-accept" type="button">
+          <span class="material-symbols-rounded ms-xs">check</span>
+          <span>Aceitar Amizade</span>
+        </button>
+      </div>
+    `;
+
+    const dismiss = () => {
+      card.style.opacity = "0";
+      card.style.transform = "translateY(-8px)";
+      setTimeout(() => card.remove(), 200);
+    };
+
+    const btnAccept = card.querySelector(".btn-knock-accept") as HTMLButtonElement;
+    const btnReject = card.querySelector(".btn-knock-reject") as HTMLButtonElement;
+
+    btnAccept.addEventListener("click", async () => {
+      btnAccept.disabled = true;
+      btnReject.disabled = true;
+      try {
+        await invoke("respond_friend_request", { friendTag: req.tag, accept: true });
+        this.showToast(`Amizade confirmada com ${req.nick} (${req.tag})!`, "how_to_reg");
+        await this.refreshFriends();
+      } catch (e: any) {
+        this.showToast(String(e), "error");
+      }
+      dismiss();
+    });
+
+    btnReject.addEventListener("click", async () => {
+      btnAccept.disabled = true;
+      btnReject.disabled = true;
+      try {
+        await invoke("respond_friend_request", { friendTag: req.tag, accept: false });
+        await this.refreshFriends();
+      } catch (_) {}
+      dismiss();
+    });
+
+    this.shownFriendReqCards.set(req.tag, card);
+    this.knockContainer.appendChild(card);
+  }
+
   private render() {
     const pendingIn = this.friends.filter((f) => f.status === "PendingIn");
+    const pendingTags = new Set(pendingIn.map((f) => f.tag));
+    for (const [tag, card] of this.shownFriendReqCards.entries()) {
+      if (!pendingTags.has(tag)) {
+        card.remove();
+        this.shownFriendReqCards.delete(tag);
+      }
+    }
+    for (const req of pendingIn) {
+      this.renderIncomingFriendReqCard(req);
+    }
     const others = this.friends
       .filter((f) => f.status !== "PendingIn")
       .sort((a, b) => {

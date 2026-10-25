@@ -272,7 +272,8 @@ impl ShortCodePublisher {
                                     let _ = send.write_all(&len).await;
                                     let _ = send.write_all(&payload).await;
                                     let _ = send.finish();
-                                    // Mantém a conexão aberta brevemente até o par receber os bytes
+                                    // Mantém a conexão aberta até o par confirmar leitura completa dos bytes
+                                    let _ = tokio::time::timeout(Duration::from_secs(4), send.stopped()).await;
                                     let _ = tokio::time::timeout(Duration::from_secs(2), conn.closed()).await;
                                 }
                             }
@@ -328,15 +329,17 @@ async fn resolve_via_iroh_rv(rv_secret_seed: &[u8; 32], hint_addr: Option<Endpoi
     let target: EndpointAddr = hint_addr.unwrap_or_else(|| target_id.into());
 
     let client_ep = Endpoint::builder(presets::N0).bind().await?;
+    let _ = tokio::time::timeout(Duration::from_millis(2000), client_ep.online()).await;
     let res = async {
         let conn = tokio::time::timeout(
-            Duration::from_secs(8),
+            Duration::from_secs(12),
             client_ep.connect(target, LUKE_RV_ALPN),
         )
         .await
         .map_err(|_| anyhow!("Tempo esgotado buscando código curto na rede P2P"))??;
 
         let (mut send, mut recv) = conn.open_bi().await?;
+        let _ = send.write_all(b"Q").await;
         let _ = send.finish();
 
         let mut len_buf = [0u8; 4];
