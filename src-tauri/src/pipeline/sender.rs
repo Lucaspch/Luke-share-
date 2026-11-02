@@ -336,6 +336,15 @@ impl SenderPipeline {
 
                         let fec_block_size = cc2.lock().recommended_fec_block_size(ef.key);
                         let mut packets = packetize(KIND_VIDEO, fid, ef.key, ts_90k, &ef.data);
+
+                        // Zero-Trust E2EE (v0.5.2 - Feature 6.2): Cifra o payload de cada fragmento antes do FEC e assinatura
+                        for (i, p) in packets.iter_mut().enumerate() {
+                            if p.len() > HEADER_LEN {
+                                crypt_media_payload(&stream_token, fid, i as u16, &mut p[HEADER_LEN..]);
+                                p[2] |= FLAG_ENCRYPTED;
+                            }
+                        }
+
                         let mut fec_packets = generate_fec(fid, ef.key, ts_90k, &packets, fec_block_size);
 
                         // Assina todos os pacotes com o token da sala para autenticação em cascata P2P
@@ -441,6 +450,13 @@ impl SenderPipeline {
                             ts_90k = ts_90k.wrapping_add(1800);
 
                             let mut pkt = pack_audio_red(prev_opus.as_deref(), opus_data, fid, ts_90k);
+
+                            // Zero-Trust E2EE (v0.5.2 - Feature 6.2): Cifra o payload de áudio
+                            if pkt.len() > HEADER_LEN {
+                                crypt_media_payload(&stream_token, fid, 0, &mut pkt[HEADER_LEN..]);
+                                pkt[2] |= FLAG_ENCRYPTED;
+                            }
+
                             sign_packet_in_place(&mut pkt, &stream_token);
                             prev_opus = Some(opus_data.to_vec());
 

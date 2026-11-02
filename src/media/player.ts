@@ -45,9 +45,150 @@ export function extractBinaryBuffer(msg: StreamChannelMsg): ArrayBuffer | null {
   return null;
 }
 
+/**
+ * Renderizador de Vídeo WebGL2 de Ultra-Baixa Latência (v0.5.2 - Feature 3.1).
+ * Faz upload zero-copy de VideoFrames diretamente para textura GPU via D3D11/ANGLE,
+ * evitando a sincronização e latência de apresentação de 2D Canvas.
+ */
+class NativeWebGLVideoPresenter {
+  private gl: WebGL2RenderingContext | null = null;
+  private program: WebGLProgram | null = null;
+  private texture: WebGLTexture | null = null;
+  private vao: WebGLVertexArrayObject | null = null;
+  private buffer: WebGLBuffer | null = null;
+  private isReady = false;
+
+  constructor(canvas: HTMLCanvasElement) {
+    try {
+      const gl = canvas.getContext("webgl2", {
+        alpha: false,
+        desynchronized: true,
+        powerPreference: "high-performance",
+        preserveDrawingBuffer: false,
+        antialias: false,
+        depth: false,
+        stencil: false,
+      }) as WebGL2RenderingContext | null;
+
+      if (!gl) return;
+      this.gl = gl;
+
+      const vsSource = `#version 300 es
+        in vec2 a_pos;
+        in vec2 a_tex;
+        out vec2 v_tex;
+        void main() {
+          gl_Position = vec4(a_pos, 0.0, 1.0);
+          v_tex = a_tex;
+        }
+      `;
+
+      const fsSource = `#version 300 es
+        precision mediump float;
+        uniform sampler2D u_tex;
+        in vec2 v_tex;
+        out vec4 outColor;
+        void main() {
+          outColor = texture(u_tex, v_tex);
+        }
+      `;
+
+      const vs = gl.createShader(gl.VERTEX_SHADER)!;
+      gl.shaderSource(vs, vsSource);
+      gl.compileShader(vs);
+
+      const fs = gl.createShader(gl.FRAGMENT_SHADER)!;
+      gl.shaderSource(fs, fsSource);
+      gl.compileShader(fs);
+
+      const prog = gl.createProgram()!;
+      gl.attachShader(prog, vs);
+      gl.attachShader(prog, fs);
+      gl.linkProgram(prog);
+
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+        console.warn("WebGL2 shader link error:", gl.getProgramInfoLog(prog));
+        return;
+      }
+      this.program = prog;
+
+      const vao = gl.createVertexArray()!;
+      gl.bindVertexArray(vao);
+      this.vao = vao;
+
+      // Geometria cobrindo todo o viewport: top-left (0,0) a bottom-right (1,1)
+      const quad = new Float32Array([
+        -1.0,  1.0,  0.0, 0.0,
+        -1.0, -1.0,  0.0, 1.0,
+         1.0,  1.0,  1.0, 0.0,
+         1.0, -1.0,  1.0, 1.0,
+      ]);
+
+      const buf = gl.createBuffer()!;
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+      this.buffer = buf;
+
+      const aPos = gl.getAttribLocation(prog, "a_pos");
+      const aTex = gl.getAttribLocation(prog, "a_tex");
+      gl.enableVertexAttribArray(aPos);
+      gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 16, 0);
+      gl.enableVertexAttribArray(aTex);
+      gl.vertexAttribPointer(aTex, 2, gl.FLOAT, false, 16, 8);
+
+      const tex = gl.createTexture()!;
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      this.texture = tex;
+
+      this.isReady = true;
+    } catch (e) {
+      console.warn("Falha ao inicializar apresentador WebGL2 (usando fallback 2D):", e);
+      this.isReady = false;
+    }
+  }
+
+  public isAvailable(): boolean {
+    return this.isReady && this.gl !== null;
+  }
+
+  public render(frame: VideoFrame, width: number, height: number): boolean {
+    if (!this.isReady || !this.gl || !this.program || !this.texture || !this.vao) return false;
+    const gl = this.gl;
+    try {
+      gl.viewport(0, 0, width, height);
+      gl.useProgram(this.program);
+      gl.bindVertexArray(this.vao);
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.texture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, frame);
+
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  public destroy() {
+    if (!this.gl) return;
+    const gl = this.gl;
+    if (this.texture) gl.deleteTexture(this.texture);
+    if (this.buffer) gl.deleteBuffer(this.buffer);
+    if (this.vao) gl.deleteVertexArray(this.vao);
+    if (this.program) gl.deleteProgram(this.program);
+    this.isReady = false;
+  }
+}
+
 export class StreamPlayer {
   private canvas: HTMLCanvasElement;
-  private ctx: CanvasRenderingContext2D;
+  private ctx: CanvasRenderingContext2D | null = null;
+  private webglPresenter: NativeWebGLVideoPresenter | null = null;
   private videoDecoder: VideoDecoder | null = null;
   private overlay: HTMLElement | null;
   private statsCallback?: (stats: PlayerStats) => void;
@@ -75,7 +216,12 @@ export class StreamPlayer {
     this.overlay = overlay;
     this.statsCallback = statsCallback;
     this.onRequestKey = onRequestKey;
-    this.ctx = canvas.getContext("2d", { alpha: false, desynchronized: true })!;
+
+    // Tenta apresentador WebGL2 direto na GPU (latência <1ms); se indisponível, fallback para 2D desynchronized
+    this.webglPresenter = new NativeWebGLVideoPresenter(canvas);
+    if (!this.webglPresenter.isAvailable()) {
+      this.ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
+    }
     this.initVideo();
   }
 
@@ -110,7 +256,11 @@ export class StreamPlayer {
           }
         }
 
-        this.ctx.drawImage(frame, 0, 0, this.canvas.width, this.canvas.height);
+        // Apresentação por hardware WebGL2 direta; fallback para 2D se necessário
+        const presented = this.webglPresenter ? this.webglPresenter.render(frame, this.canvas.width, this.canvas.height) : false;
+        if (!presented && this.ctx) {
+          this.ctx.drawImage(frame, 0, 0, this.canvas.width, this.canvas.height);
+        }
         frame.close();
 
         if (!this.hasFirstDecodedFrame) {
@@ -307,6 +457,11 @@ export class StreamPlayer {
   }
 
   public destroy() {
+    if (this.webglPresenter) {
+      this.webglPresenter.destroy();
+      this.webglPresenter = null;
+    }
+
     if (this.videoDecoder) {
       try {
         if (this.videoDecoder.state !== "closed") {

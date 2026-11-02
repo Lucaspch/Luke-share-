@@ -120,9 +120,17 @@ impl RetransmitRing {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CongestionResolutionTier {
+    Full, // 100% de resolução (1080p / Origem)
+    Half, // ~66% de resolução (720p para preservar fluidez em rede instável)
+    Low,  // ~45% de resolução (480p modo resiliência máxima)
+}
+
 /// Controlador de Congestionamento Adaptativo (AIMD) para taxa de bits e nível de FEC do encoder.
 /// Reduz multiplicativamente sob congestionamento (perda > 2.0% ou RTT alto)
 /// e aumenta aditivamente quando o canal está estável.
+/// v0.5.2: BWE Warm-up Probe (Feature 6.1) e Tier de Resolução Adaptativa (Feature 3.2).
 #[derive(Debug, Clone)]
 pub struct CongestionController {
     min_bitrate: u32,
@@ -132,23 +140,44 @@ pub struct CongestionController {
     last_decrease: Option<Instant>,
     loss_ewma: f32,
     rtt_ewma: u32,
+    warmup_until: Option<Instant>,
+    last_tier: CongestionResolutionTier,
 }
 
 impl CongestionController {
     pub fn new(min_bitrate: u32, max_bitrate: u32, initial_bitrate: u32) -> Self {
+        // BWE Warm-up: Inicia com sonda suave (1/3 da taxa máxima) para evitar congestionar a fila do buffer na entrada
+        let clamped_initial = initial_bitrate.clamp(min_bitrate, max_bitrate);
+        let safe_probe = (clamped_initial / 3).clamp(min_bitrate, 4_500_000).min(max_bitrate);
         Self {
             min_bitrate,
             max_bitrate,
-            current_bitrate: initial_bitrate.clamp(min_bitrate, max_bitrate),
+            current_bitrate: safe_probe,
             clean_ticks: 0,
             last_decrease: None,
             loss_ewma: 0.0,
             rtt_ewma: 0,
+            warmup_until: Some(Instant::now() + Duration::from_millis(900)),
+            last_tier: CongestionResolutionTier::Full,
         }
     }
 
     pub fn current_bitrate(&self) -> u32 {
         self.current_bitrate
+    }
+
+    pub fn current_tier(&self) -> CongestionResolutionTier {
+        self.last_tier
+    }
+
+    pub fn resolution_tier(&self) -> CongestionResolutionTier {
+        if self.loss_ewma > 15.0 && self.current_bitrate <= self.min_bitrate + 400_000 {
+            CongestionResolutionTier::Low
+        } else if self.loss_ewma > 7.5 && self.current_bitrate <= self.min_bitrate + 1_500_000 {
+            CongestionResolutionTier::Half
+        } else {
+            CongestionResolutionTier::Full
+        }
     }
 
     /// Retorna o tamanho ideal do bloco FEC (menor = proteção mais forte).
@@ -193,6 +222,32 @@ impl CongestionController {
             };
         }
 
+        // BWE Warm-up Fast Ramp-up (Feature 6.1): primeiros 900ms sob canal limpo aceleram agressivamente até o teto
+        if let Some(until) = self.warmup_until {
+            if now < until {
+                if loss_pct <= 0.8 && rtt_ms <= 180 {
+                    let step = (self.max_bitrate / 4).max(2_500_000);
+                    let new_br = (self.current_bitrate + step).min(self.max_bitrate);
+                    if new_br != self.current_bitrate {
+                        tracing::info!(
+                            "congestion_control: BWE probe acelerando conexão: canal estável -> {} bps (teto {} bps)",
+                            new_br, self.max_bitrate
+                        );
+                        self.current_bitrate = new_br;
+                        if new_br >= self.max_bitrate {
+                            self.warmup_until = None;
+                        }
+                        return Some(new_br);
+                    }
+                } else {
+                    // Perda prematura durante a sonda: encerra o aquecimento e recua imediatamente
+                    self.warmup_until = None;
+                }
+            } else {
+                self.warmup_until = None;
+            }
+        }
+
         // Condição de congestionamento: Perda > 2.0% ou RTT severo (> 230ms)
         if loss_pct > 2.0 || rtt_ms > 230 {
             if let Some(last) = self.last_decrease {
@@ -216,8 +271,8 @@ impl CongestionController {
 
             if new_br != self.current_bitrate {
                 tracing::info!(
-                    "congestion_control: AIMD decréscimo multiplicativo: perda={:.1}%, RTT={}ms -> {} -> {} bps",
-                    loss_pct, rtt_ms, self.current_bitrate, new_br
+                    "congestion_control: AIMD decréscimo multiplicativo: perda={:.1}%, RTT={}ms -> {} -> {} bps (Tier: {:?})",
+                    loss_pct, rtt_ms, self.current_bitrate, new_br, self.resolution_tier()
                 );
                 self.current_bitrate = new_br;
                 return Some(new_br);

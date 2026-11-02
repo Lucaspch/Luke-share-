@@ -422,10 +422,18 @@ async fn run_single_session(
                 match res {
                     Ok(dg) => {
                         let now_ms = start_instant.elapsed().as_millis() as u64;
-                        if let Some((h, payload)) = MediaHeader::parse(&dg) {
+                        if let Some((mut h, payload)) = MediaHeader::parse(&dg) {
+                            let mut dec_payload = payload.to_vec();
+                            if (h.flags & FLAG_ENCRYPTED) != 0 {
+                                if let Some(tok) = session_tok {
+                                    crypt_media_payload(&tok, h.frame_id, h.frag_idx, &mut dec_payload);
+                                    h.flags &= !FLAG_ENCRYPTED;
+                                }
+                            }
+
                             match h.kind {
                                 KIND_VIDEO | KIND_FEC => {
-                                    let events = reassembler.push(&h, payload, now_ms);
+                                    let events = reassembler.push(&h, &dec_payload, now_ms);
                                     for ev in events {
                                         match ev {
                                             RxEvent::Frame { key, ts_90k, data, .. } => {
@@ -448,7 +456,7 @@ async fn run_single_session(
                                 }
                                 KIND_AUDIO => {
                                     if let Some(ref ap) = audio_player {
-                                        for pcm in audio_rx_stream.push_packet(&h, payload) {
+                                        for pcm in audio_rx_stream.push_packet(&h, &dec_payload) {
                                             ap.push_samples(&pcm);
                                         }
                                     }
@@ -481,10 +489,18 @@ async fn run_single_session(
 
                 last_relayed_rx = Instant::now();
                 let now_ms = start_instant.elapsed().as_millis() as u64;
-                if let Some((h, payload)) = MediaHeader::parse(&mesh_dg) {
+                if let Some((mut h, payload)) = MediaHeader::parse(&mesh_dg) {
+                    let mut dec_payload = payload.to_vec();
+                    if (h.flags & FLAG_ENCRYPTED) != 0 {
+                        if let Some(tok) = expected_tok {
+                            crypt_media_payload(&tok, h.frame_id, h.frag_idx, &mut dec_payload);
+                            h.flags &= !FLAG_ENCRYPTED;
+                        }
+                    }
+
                     match h.kind {
                         KIND_VIDEO | KIND_FEC => {
-                            let events = reassembler.push(&h, payload, now_ms);
+                            let events = reassembler.push(&h, &dec_payload, now_ms);
                             for ev in events {
                                 match ev {
                                     RxEvent::Frame { key, ts_90k, data, .. } => {
@@ -504,7 +520,7 @@ async fn run_single_session(
                         }
                         KIND_AUDIO => {
                             if let Some(ref ap) = audio_player {
-                                for pcm in audio_rx_stream.push_packet(&h, payload) {
+                                for pcm in audio_rx_stream.push_packet(&h, &dec_payload) {
                                     ap.push_samples(&pcm);
                                 }
                             }

@@ -107,6 +107,7 @@ pub const KIND_RELAY_ANNOUNCE: u8 = 8; // comunicação para topologia Mesh Rela
 pub const FLAG_KEY: u8 = 0b001;
 pub const FLAG_LAST: u8 = 0b010;
 pub const FLAG_AUDIO_RED: u8 = 0b100; // áudio carrega cópia redundante do frame Opus anterior (fid - 1)
+pub const FLAG_ENCRYPTED: u8 = 0b1000; // payload cifrado com Keystream ponta-a-ponta (Zero-Trust E2EE v0.5.2)
 
 pub const FEC_HEADER_LEN: usize = 4; // start_idx (2B) + count (2B)
 
@@ -278,6 +279,30 @@ pub fn compute_packet_auth_tag(secret: &[u8; 16], pkt: &[u8]) -> u8 {
 pub fn sign_packet_in_place(pkt: &mut [u8], secret: &[u8; 16]) {
     if pkt.len() >= HEADER_LEN {
         pkt[3] = compute_packet_auth_tag(secret, pkt);
+    }
+}
+
+/// Aplica criptografia simétrica de fluxo ponta-a-ponta (Zero-Trust E2EE v0.5.2) sobre o payload de mídia.
+/// O keystream é derivado deterministicamente de `SHA-256(secret || frame_id || frag_idx || block_counter)`.
+/// Por ser uma cifra XOR, é perfeitamente simétrica: encriptação e decriptação são a mesma operação.
+pub fn crypt_media_payload(secret: &[u8; 16], frame_id: u32, frag_idx: u16, payload: &mut [u8]) {
+    use sha2::{Digest, Sha256};
+    let mut block_idx = 0u32;
+    let mut offset = 0;
+    while offset < payload.len() {
+        let mut hasher = Sha256::new();
+        hasher.update(secret);
+        hasher.update(&frame_id.to_be_bytes());
+        hasher.update(&frag_idx.to_be_bytes());
+        hasher.update(&block_idx.to_be_bytes());
+        let mask = hasher.finalize();
+
+        let chunk_len = (payload.len() - offset).min(32);
+        for i in 0..chunk_len {
+            payload[offset + i] ^= mask[i];
+        }
+        offset += chunk_len;
+        block_idx += 1;
     }
 }
 

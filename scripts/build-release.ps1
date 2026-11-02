@@ -59,7 +59,29 @@ if (-not (Test-Path $keyPath)) {
 
 $privateKey = Get-Content $keyPath -Raw
 $env:TAURI_SIGNING_PRIVATE_KEY = $privateKey
-$env:PATH = "C:\Program Files\CMake\bin;" + $env:PATH
+
+$crtLib = "C:\Users\lucas\AppData\Local\cargo-xwin\xwin\crt\lib\x86_64"
+$sdkLib = "C:\Users\lucas\AppData\Local\cargo-xwin\xwin\sdk\lib\um\x86_64"
+$ucrtLib = "C:\Users\lucas\AppData\Local\cargo-xwin\xwin\sdk\lib\ucrt\x86_64"
+$crtInc = "C:\Users\lucas\AppData\Local\cargo-xwin\xwin\crt\include"
+$ucrtInc = "C:\Users\lucas\AppData\Local\cargo-xwin\xwin\sdk\include\ucrt"
+$umInc = "C:\Users\lucas\AppData\Local\cargo-xwin\xwin\sdk\include\um"
+$sharedInc = "C:\Users\lucas\AppData\Local\cargo-xwin\xwin\sdk\include\shared"
+
+if (Test-Path $crtLib) {
+    $env:LIB = "$crtLib;$sdkLib;$ucrtLib"
+    $env:INCLUDE = "$crtInc;$ucrtInc;$umInc;$sharedInc"
+    $env:CC = "clang-cl"
+    $env:CXX = "clang-cl"
+    $env:AR = "llvm-ar"
+    if (Test-Path "$env:USERPROFILE\.cargo\bin\rc.exe") {
+        $env:RC = "$env:USERPROFILE\.cargo\bin\rc.exe"
+    }
+    $env:CC_PREFER_CLANG_CL_OVER_MSVC = "1"
+    $env:CMAKE_GENERATOR = "Ninja"
+}
+
+$env:PATH = "C:\Program Files\CMake\bin;C:\Program Files\LLVM\bin;$env:USERPROFILE\.cargo\bin;" + $env:PATH
 
 # 3. Compilação Release com Tauri
 Write-Host "Compilando binario e instalador assinado..." -ForegroundColor Yellow
