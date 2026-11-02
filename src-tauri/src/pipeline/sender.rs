@@ -313,23 +313,29 @@ impl SenderPipeline {
 
                         let p2p_viewers = p2p_host_v.active_viewers();
                         if p2p_viewers.is_empty() {
+                            last_direct_cnt = 0;
                             continue;
                         }
 
                         // Apenas espectadores diretos (não cascateados) pesam no cálculo do teto de upload do Host!
                         let direct_viewers_cnt = p2p_viewers.iter().filter(|v| !v.is_cascaded()).count().max(1);
                         if direct_viewers_cnt != last_direct_cnt {
+                            let first_viewer_joined = last_direct_cnt == 0;
                             last_direct_cnt = direct_viewers_cnt;
                             let base_br = base_br_v.load(Ordering::Relaxed);
                             let target_br = calculate_adaptive_bitrate(base_br, direct_viewers_cnt);
                             let cur_br = {
                                 let mut cc = cc2.lock();
                                 cc.set_max_bitrate(target_br);
-                                cc.current_bitrate()
+                                if first_viewer_joined {
+                                    cc.begin_warmup_probe()
+                                } else {
+                                    cc.current_bitrate()
+                                }
                             };
                             enc2.read().set_bitrate(cur_br);
                             tracing::info!(
-                                "sender: teto de upload ajustado p/ {target_br} bps ({direct_viewers_cnt} diretos de {} totais)",
+                                "sender: teto de upload ajustado p/ {target_br} bps (atual {cur_br} bps, {direct_viewers_cnt} diretos de {} totais)",
                                 p2p_viewers.len()
                             );
                         }
@@ -337,11 +343,15 @@ impl SenderPipeline {
                         let fec_block_size = cc2.lock().recommended_fec_block_size(ef.key);
                         let mut packets = packetize(KIND_VIDEO, fid, ef.key, ts_90k, &ef.data);
 
-                        // Zero-Trust E2EE (v0.5.2 - Feature 6.2): Cifra o payload de cada fragmento antes do FEC e assinatura
-                        for (i, p) in packets.iter_mut().enumerate() {
-                            if p.len() > HEADER_LEN {
-                                crypt_media_payload(&stream_token, fid, i as u16, &mut p[HEADER_LEN..]);
-                                p[2] |= FLAG_ENCRYPTED;
+                        // Zero-Trust E2EE v2 (v0.5.3): Cifra no domínio pré-FEC quando todos os espectadores
+                        // negociaram `proto_ver >= PROTO_E2EE_V2` (mantendo compatibilidade limpa com clientes legados!)
+                        let use_e2ee = p2p_viewers.iter().all(|v| v.proto_ver >= PROTO_E2EE_V2);
+                        if use_e2ee {
+                            for (i, p) in packets.iter_mut().enumerate() {
+                                if p.len() > HEADER_LEN {
+                                    crypt_media_payload(&stream_token, fid, i as u16, &mut p[HEADER_LEN..]);
+                                    p[2] |= FLAG_ENCRYPTED;
+                                }
                             }
                         }
 
@@ -451,8 +461,9 @@ impl SenderPipeline {
 
                             let mut pkt = pack_audio_red(prev_opus.as_deref(), opus_data, fid, ts_90k);
 
-                            // Zero-Trust E2EE (v0.5.2 - Feature 6.2): Cifra o payload de áudio
-                            if pkt.len() > HEADER_LEN {
+                            // Zero-Trust E2EE v2 (v0.5.3): Cifra o payload de áudio quando todos os viewers suportam E2EE v2
+                            let use_e2ee = p2p_viewers.iter().all(|v| v.proto_ver >= PROTO_E2EE_V2);
+                            if use_e2ee && pkt.len() > HEADER_LEN {
                                 crypt_media_payload(&stream_token, fid, 0, &mut pkt[HEADER_LEN..]);
                                 pkt[2] |= FLAG_ENCRYPTED;
                             }

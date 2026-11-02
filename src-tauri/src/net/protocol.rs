@@ -8,6 +8,7 @@ pub const DISCOVERY_PORT: u16 = 47800;
 pub const CONTROL_PORT: u16 = 47801;
 pub const MAGIC: &str = "LKSH";
 pub const PROTO_VERSION: u8 = 1;
+pub const PROTO_E2EE_V2: u8 = 2; // v0.5.3+: E2EE no domínio do texto cifrado compatível com FEC XOR
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PeerStatus {
@@ -39,7 +40,13 @@ pub struct AudioOffer {
 #[serde(tag = "t")]
 pub enum Control {
     /// viewer → sharer
-    Watch { peer_id: Uuid, nick: String, udp_port: u16 },
+    Watch {
+        peer_id: Uuid,
+        nick: String,
+        udp_port: u16,
+        #[serde(default)]
+        proto_ver: u8,
+    },
     /// sharer → viewer
     Accept {
         video: VideoOffer,
@@ -368,5 +375,21 @@ mod tests {
         };
         write_control(&mut a, &m).await.unwrap();
         assert_eq!(read_control(&mut b).await.unwrap(), m);
+    }
+
+    #[test]
+    fn watch_backward_compat_deserializes_legacy_viewer_as_v0() {
+        let id = Uuid::new_v4();
+        let legacy_json = format!(r#"{{"t":"Watch","peer_id":"{id}","nick":"Rafalão","udp_port":0}}"#);
+        let parsed: Control = serde_json::from_str(&legacy_json).unwrap();
+        assert_eq!(
+            parsed,
+            Control::Watch {
+                peer_id: id,
+                nick: "Rafalão".into(),
+                udp_port: 0,
+                proto_ver: 0,
+            }
+        );
     }
 }

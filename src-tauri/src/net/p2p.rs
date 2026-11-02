@@ -108,6 +108,7 @@ impl Default for ViewerNetHealth {
 pub struct P2pViewer {
     pub peer_id: Uuid,
     pub nick: String,
+    pub proto_ver: u8,
     pub conn: Connection,
     pub tx_ctrl: mpsc::Sender<Control>,
     /// Ativado quando apenas este espectador sofre perda isolada de download (recebe paridade FEC extra).
@@ -504,12 +505,19 @@ impl P2pHostManager {
                                 Err(_) => return,
                             };
 
-                            let (peer_id, nick) = match msg {
-                                Control::Watch { peer_id, nick, .. } => (peer_id, nick),
+                            let (peer_id, nick, proto_ver) = match msg {
+                                Control::Watch {
+                                    peer_id,
+                                    nick,
+                                    proto_ver,
+                                    ..
+                                } => (peer_id, nick, proto_ver),
                                 _ => return,
                             };
 
-                            tracing::info!("p2p_host: espectador P2P conectado: {nick} ({peer_id})");
+                            tracing::info!(
+                                "p2p_host: espectador P2P conectado: {nick} ({peer_id}, proto_ver={proto_ver})"
+                            );
 
                             let accept_msg = Control::Accept {
                                 video: offer_v,
@@ -527,6 +535,7 @@ impl P2pHostManager {
                             let viewer = P2pViewer {
                                 peer_id,
                                 nick: nick.clone(),
+                                proto_ver,
                                 conn: conn.clone(),
                                 tx_ctrl,
                                 needs_extra_fec: Arc::new(AtomicBool::new(false)),
@@ -727,6 +736,7 @@ mod tests {
                 peer_id: Uuid::new_v4(),
                 nick: "LucasViewer".into(),
                 udp_port: 0,
+                proto_ver: PROTO_E2EE_V2,
             };
             write_control(&mut send, &watch_msg).await.expect("write_control");
 
@@ -776,6 +786,7 @@ mod tests {
             peer_id: Uuid::new_v4(),
             nick: "ViewerTest".into(),
             udp_port: 0,
+            proto_ver: PROTO_E2EE_V2,
         };
         write_control(&mut send, &watch_msg).await?;
         let resp = read_control(&mut recv).await?;

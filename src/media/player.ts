@@ -51,14 +51,23 @@ export function extractBinaryBuffer(msg: StreamChannelMsg): ArrayBuffer | null {
  * evitando a sincronização e latência de apresentação de 2D Canvas.
  */
 class NativeWebGLVideoPresenter {
+  private canvas: HTMLCanvasElement;
   private gl: WebGL2RenderingContext | null = null;
   private program: WebGLProgram | null = null;
   private texture: WebGLTexture | null = null;
   private vao: WebGLVertexArrayObject | null = null;
   private buffer: WebGLBuffer | null = null;
   private isReady = false;
+  private onContextLost = (e: Event) => {
+    e.preventDefault();
+    this.isReady = false;
+  };
+  private onContextRestored = () => {
+    this.initResources();
+  };
 
   constructor(canvas: HTMLCanvasElement) {
+    this.canvas = canvas;
     try {
       const gl = canvas.getContext("webgl2", {
         alpha: false,
@@ -72,7 +81,19 @@ class NativeWebGLVideoPresenter {
 
       if (!gl) return;
       this.gl = gl;
+      canvas.addEventListener("webglcontextlost", this.onContextLost);
+      canvas.addEventListener("webglcontextrestored", this.onContextRestored);
+      this.initResources();
+    } catch (e) {
+      console.warn("Falha ao inicializar apresentador WebGL2 (usando fallback 2D):", e);
+      this.isReady = false;
+    }
+  }
 
+  private initResources() {
+    if (!this.gl) return;
+    const gl = this.gl;
+    try {
       const vsSource = `#version 300 es
         in vec2 a_pos;
         in vec2 a_tex;
@@ -105,9 +126,12 @@ class NativeWebGLVideoPresenter {
       gl.attachShader(prog, vs);
       gl.attachShader(prog, fs);
       gl.linkProgram(prog);
+      gl.deleteShader(vs);
+      gl.deleteShader(fs);
 
       if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
         console.warn("WebGL2 shader link error:", gl.getProgramInfoLog(prog));
+        this.isReady = false;
         return;
       }
       this.program = prog;
@@ -138,6 +162,8 @@ class NativeWebGLVideoPresenter {
 
       const tex = gl.createTexture()!;
       gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
@@ -146,7 +172,7 @@ class NativeWebGLVideoPresenter {
 
       this.isReady = true;
     } catch (e) {
-      console.warn("Falha ao inicializar apresentador WebGL2 (usando fallback 2D):", e);
+      console.warn("Falha ao alocar recursos WebGL2:", e);
       this.isReady = false;
     }
   }
@@ -175,6 +201,8 @@ class NativeWebGLVideoPresenter {
   }
 
   public destroy() {
+    this.canvas.removeEventListener("webglcontextlost", this.onContextLost);
+    this.canvas.removeEventListener("webglcontextrestored", this.onContextRestored);
     if (!this.gl) return;
     const gl = this.gl;
     if (this.texture) gl.deleteTexture(this.texture);
@@ -290,8 +318,9 @@ export class StreamPlayer {
         }
       },
       error: (e) => {
-        console.warn("VideoDecoder reportou erro, reinicializando decodificador:", e);
+        console.warn("VideoDecoder reportou erro, reinicializando decodificador e solicitando PLI:", e);
         this.initVideo();
+        this.onRequestKey?.();
       },
     });
 
@@ -448,7 +477,9 @@ export class StreamPlayer {
       });
       this.videoDecoder.decode(chunk);
     } catch (e) {
-      console.warn("Erro decodificando frame de vídeo:", e);
+      console.warn("Erro decodificando frame de vídeo, solicitando novo Keyframe:", e);
+      this.hasFirstKeyFrame = false;
+      this.onRequestKey?.();
     }
   }
 

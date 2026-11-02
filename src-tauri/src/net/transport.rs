@@ -74,9 +74,15 @@ pub fn generate_fec(
         }
 
         let last_frag_len = block_slices.last().map(|s| s.len() as u16).unwrap_or(0);
+        let encrypted = packets
+            .get(start)
+            .is_some_and(|p| p.len() >= 3 && (p[2] & FLAG_ENCRYPTED) != 0);
 
         let mut out = Vec::with_capacity(HEADER_LEN + FEC_HEADER_BYTES + max_len);
-        let flags = if key { FLAG_KEY } else { 0 };
+        let mut flags = if key { FLAG_KEY } else { 0 };
+        if encrypted {
+            flags |= FLAG_ENCRYPTED;
+        }
         MediaHeader {
             kind: KIND_FEC,
             flags,
@@ -130,7 +136,7 @@ pub enum CongestionResolutionTier {
 /// Controlador de Congestionamento Adaptativo (AIMD) para taxa de bits e nível de FEC do encoder.
 /// Reduz multiplicativamente sob congestionamento (perda > 2.0% ou RTT alto)
 /// e aumenta aditivamente quando o canal está estável.
-/// v0.5.2: BWE Warm-up Probe (Feature 6.1) e Tier de Resolução Adaptativa (Feature 3.2).
+/// v0.5.3: BWE Warm-up Probe sincronizado com a entrada do espectador (70% -> 100% em 2 ciclos) e Tier de Resolução Adaptativa.
 #[derive(Debug, Clone)]
 pub struct CongestionController {
     min_bitrate: u32,
@@ -140,26 +146,36 @@ pub struct CongestionController {
     last_decrease: Option<Instant>,
     loss_ewma: f32,
     rtt_ewma: u32,
-    warmup_until: Option<Instant>,
+    warmup_ticks: u8,
     last_tier: CongestionResolutionTier,
 }
 
 impl CongestionController {
     pub fn new(min_bitrate: u32, max_bitrate: u32, initial_bitrate: u32) -> Self {
-        // BWE Warm-up: Inicia com sonda suave (1/3 da taxa máxima) para evitar congestionar a fila do buffer na entrada
         let clamped_initial = initial_bitrate.clamp(min_bitrate, max_bitrate);
-        let safe_probe = (clamped_initial / 3).clamp(min_bitrate, 4_500_000).min(max_bitrate);
         Self {
             min_bitrate,
             max_bitrate,
-            current_bitrate: safe_probe,
+            current_bitrate: clamped_initial,
             clean_ticks: 0,
             last_decrease: None,
             loss_ewma: 0.0,
             rtt_ewma: 0,
-            warmup_until: Some(Instant::now() + Duration::from_millis(900)),
+            warmup_ticks: 0,
             last_tier: CongestionResolutionTier::Full,
         }
+    }
+
+    /// Inicia uma sonda suave de entrada (70% da taxa alvo) quando o primeiro espectador conecta,
+    /// absorvendo o pico do Keyframe inicial sem estourar o buffer QUIC e atingindo 100% em ~2s.
+    pub fn begin_warmup_probe(&mut self) -> u32 {
+        let probe = ((self.max_bitrate as u64 * 70 / 100) as u32)
+            .max(self.min_bitrate)
+            .min(self.max_bitrate);
+        self.current_bitrate = probe;
+        self.warmup_ticks = 2;
+        self.clean_ticks = 0;
+        probe
     }
 
     pub fn current_bitrate(&self) -> u32 {
@@ -222,29 +238,29 @@ impl CongestionController {
             };
         }
 
-        // BWE Warm-up Fast Ramp-up (Feature 6.1): primeiros 900ms sob canal limpo aceleram agressivamente até o teto
-        if let Some(until) = self.warmup_until {
-            if now < until {
-                if loss_pct <= 0.8 && rtt_ms <= 180 {
-                    let step = (self.max_bitrate / 4).max(2_500_000);
-                    let new_br = (self.current_bitrate + step).min(self.max_bitrate);
-                    if new_br != self.current_bitrate {
-                        tracing::info!(
-                            "congestion_control: BWE probe acelerando conexão: canal estável -> {} bps (teto {} bps)",
-                            new_br, self.max_bitrate
-                        );
-                        self.current_bitrate = new_br;
-                        if new_br >= self.max_bitrate {
-                            self.warmup_until = None;
-                        }
-                        return Some(new_br);
-                    }
+        // BWE Warm-up Fast Ramp-up: nos 2 primeiros relatórios após conexão limpa, sobe suavemente de 70% -> 85% -> 100%
+        if self.warmup_ticks > 0 {
+            if loss_pct <= 1.2 && rtt_ms <= 200 {
+                self.warmup_ticks -= 1;
+                let new_br = if self.warmup_ticks == 0 {
+                    self.max_bitrate
                 } else {
-                    // Perda prematura durante a sonda: encerra o aquecimento e recua imediatamente
-                    self.warmup_until = None;
+                    ((self.current_bitrate as u64 + self.max_bitrate as u64) / 2) as u32
                 }
+                .min(self.max_bitrate);
+
+                if new_br != self.current_bitrate {
+                    tracing::info!(
+                        "congestion_control: BWE probe acelerando conexão: canal estável -> {} bps (teto {} bps)",
+                        new_br, self.max_bitrate
+                    );
+                    self.current_bitrate = new_br;
+                    return Some(new_br);
+                }
+                return None;
             } else {
-                self.warmup_until = None;
+                // Perda ou latência elevada durante a sonda: encerra o aquecimento e deixa o AIMD atuar
+                self.warmup_ticks = 0;
             }
         }
 
@@ -345,6 +361,8 @@ struct Partial {
     last_nack: u64,
     nacks: u8,
     fec_blocks: Vec<FecBlock>,
+    frame_encrypted: bool,
+    has_video_pkt: bool,
 }
 
 impl Partial {
@@ -419,6 +437,8 @@ pub struct Reassembler {
     stall_since: Option<u64>,
     last_pli: Option<u64>,
     last_nack_empty: Option<u64>,
+    stream_token: Option<[u8; 16]>,
+    last_video_encrypted: bool,
     pub packets_rx: u64,
     pub packets_lost: u64,
     pub nacks_sent: u64,
@@ -458,6 +478,8 @@ impl Reassembler {
             stall_since: None,
             last_pli: None,
             last_nack_empty: None,
+            stream_token: None,
+            last_video_encrypted: false,
             packets_rx: 0,
             packets_lost: 0,
             nacks_sent: 0,
@@ -468,6 +490,13 @@ impl Reassembler {
             frames_delivered: 0,
             rtt_ms: 0,
         }
+    }
+
+    /// Configura o segredo E2EE da sala para decifragem pós-remontagem FEC.
+    /// Manter os fragmentos cifrados durante a remontagem garante que a paridade XOR do FEC
+    /// reconstrua o texto cifrado exato $C_m = \text{parity} \oplus C_{j \neq m}$ sem corromper o H.264!
+    pub fn set_stream_token(&mut self, token: Option<[u8; 16]>) {
+        self.stream_token = token;
     }
 
     pub fn waiting_for_key(&self) -> bool {
@@ -551,6 +580,11 @@ impl Reassembler {
             let total_video_frags = u16::from_be_bytes([payload[4], payload[5]]);
             let last_frag_len = u16::from_be_bytes([payload[6], payload[7]]);
             let parity = payload[FEC_HEADER_BYTES..].to_vec();
+            let fec_enc_flag = (h.flags & FLAG_ENCRYPTED) != 0;
+            if fec_enc_flag {
+                self.last_video_encrypted = true;
+            }
+            let inferred_enc = fec_enc_flag || self.last_video_encrypted;
 
             let p = self.frames.entry(h.frame_id).or_insert_with(|| Partial {
                 cnt: total_video_frags,
@@ -561,7 +595,12 @@ impl Reassembler {
                 last_nack: 0,
                 nacks: 0,
                 fec_blocks: Vec::new(),
+                frame_encrypted: inferred_enc,
+                has_video_pkt: false,
             });
+            if fec_enc_flag {
+                p.frame_encrypted = true;
+            }
 
             if !p.fec_blocks.iter().any(|b| b.start_idx == start_idx && b.count == count) {
                 p.fec_blocks.push(FecBlock {
@@ -585,6 +624,9 @@ impl Reassembler {
             return ev;
         }
 
+        let is_video_enc = (h.flags & FLAG_ENCRYPTED) != 0;
+        self.last_video_encrypted = is_video_enc;
+
         let p = self.frames.entry(h.frame_id).or_insert_with(|| Partial {
             cnt: h.frag_cnt,
             frags: vec![None; h.frag_cnt as usize],
@@ -594,7 +636,11 @@ impl Reassembler {
             last_nack: 0,
             nacks: 0,
             fec_blocks: Vec::new(),
+            frame_encrypted: is_video_enc,
+            has_video_pkt: true,
         });
+        p.frame_encrypted = is_video_enc;
+        p.has_video_pkt = true;
         if p.cnt != h.frag_cnt {
             return ev;
         }
@@ -661,8 +707,13 @@ impl Reassembler {
 
         while self.frames.get(&next).is_some_and(|p| p.complete()) {
             let p = self.frames.remove(&next).unwrap();
-            let mut data = Vec::new();
-            for f in p.frags.into_iter().flatten() {
+            let mut data = Vec::with_capacity((p.cnt as usize) * MAX_PAYLOAD);
+            for (frag_idx, mut f) in p.frags.into_iter().enumerate().filter_map(|(i, opt)| opt.map(|v| (i, v))) {
+                if p.frame_encrypted {
+                    if let Some(ref tok) = self.stream_token {
+                        crypt_media_payload(tok, next, frag_idx as u16, &mut f);
+                    }
+                }
                 data.extend_from_slice(&f);
             }
             self.frames_delivered += 1;
@@ -973,6 +1024,149 @@ mod tests {
                 assert_eq!(data, &d3);
             }
             _ => panic!("esperava fast-forward imediato para o Keyframe 3"),
+        }
+    }
+
+    #[test]
+    fn bwe_warmup_probe_ramps_to_target_cleanly() {
+        let mut cc = CongestionController::new(1_500_000, 10_000_000, 10_000_000);
+        let probe = cc.begin_warmup_probe();
+        assert_eq!(probe, 7_000_000);
+
+        // 1º relatório limpo (~1s): sobe de 70% para 85%
+        assert_eq!(cc.on_telemetry(28, 0.0), Some(8_500_000));
+        // 2º relatório limpo (~2s): atinge 100% do teto sem estourar buffer
+        assert_eq!(cc.on_telemetry(28, 0.0), Some(10_000_000));
+        assert_eq!(cc.current_bitrate(), 10_000_000);
+    }
+
+    #[test]
+    fn e2ee_fec_recovery_preserves_exact_bitstream() {
+        // Valida a remontagem FEC no domínio cifrado (v0.5.3):
+        // 1) Recuperação instantânea FEC sob E2EE (1 pacote perdido, inclusive o último fragmento menor que MTU)
+        // 2) Recuperação combinada NACK + FEC sob E2EE (2 pacotes perdidos no mesmo bloco)
+        // 3) Compatibilidade reversa com Host v0.5.2 (onde KIND_FEC não carregava FLAG_ENCRYPTED)
+        // 4) Transição dinâmica para não-cifrado quando um viewer legado entra na sala
+        let secret = [0x7Au8; 16];
+        let mut r = Reassembler::new();
+        r.set_stream_token(Some(secret));
+
+        // 1. Keyframe inicial (fid = 1) com perda do último fragmento recuperado via FEC
+        let kf_plain = data(2400, 0x11);
+        let mut kf_pkts = packetize(KIND_VIDEO, 1, true, 0, &kf_plain);
+        for (i, p) in kf_pkts.iter_mut().enumerate() {
+            crypt_media_payload(&secret, 1, i as u16, &mut p[HEADER_LEN..]);
+            p[2] |= FLAG_ENCRYPTED;
+        }
+        let mut kf_fec = generate_fec(1, true, 0, &kf_pkts, 4);
+        for p in &mut kf_pkts {
+            sign_packet_in_place(p, &secret);
+        }
+        for fp in &mut kf_fec {
+            sign_packet_in_place(fp, &secret);
+        }
+
+        // Perde o último fragmento (índice 2, tamanho parcial 240B) do Keyframe e reconstrói via FEC
+        let mut kf_events = feed(&mut r, &kf_pkts[..2], 0);
+        assert!(kf_events.is_empty());
+        kf_events.extend(feed(&mut r, &kf_fec, 1));
+        assert_eq!(kf_events.len(), 1);
+        match &kf_events[0] {
+            RxEvent::Frame { data, key, .. } => {
+                assert!(*key);
+                assert_eq!(data, &kf_plain);
+            }
+            _ => panic!("esperava entrega do Keyframe 1 via FEC"),
+        }
+
+        // 2. Frame 2 (fid = 2, 5 fragmentos) onde o fragmento intermediário 2 se perde na rede e o FEC atua
+        let f2_plain = data(5000, 0x33);
+        let mut f2_pkts = packetize(KIND_VIDEO, 2, false, 3000, &f2_plain);
+        for (i, p) in f2_pkts.iter_mut().enumerate() {
+            crypt_media_payload(&secret, 2, i as u16, &mut p[HEADER_LEN..]);
+            p[2] |= FLAG_ENCRYPTED;
+        }
+        let mut f2_fec = generate_fec(2, false, 3000, &f2_pkts, 8);
+        for p in &mut f2_pkts {
+            sign_packet_in_place(p, &secret);
+        }
+        for fp in &mut f2_fec {
+            sign_packet_in_place(fp, &secret);
+        }
+
+        let lossy_f2: Vec<Vec<u8>> = f2_pkts
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != 2)
+            .map(|(_, p)| p.clone())
+            .collect();
+        assert!(feed(&mut r, &lossy_f2, 10).is_empty());
+        let f2_events = feed(&mut r, &f2_fec, 11);
+        assert_eq!(f2_events.len(), 1);
+        match &f2_events[0] {
+            RxEvent::Frame { data, .. } => {
+                assert_eq!(data, &f2_plain, "FEC sob E2EE deve preservar 100% dos bytes do bitstream H.264!");
+            }
+            _ => panic!("esperava entrega do Frame 2 via FEC"),
+        }
+
+        // 3. Frame 3 (fid = 3, 5 fragmentos): 2 pacotes perdidos (1 e 3) -> 1 via NACK + 3 via FEC!
+        let f3_plain = data(4800, 0x55);
+        let mut f3_pkts = packetize(KIND_VIDEO, 3, false, 6000, &f3_plain);
+        let mut ring = RetransmitRing::new(64);
+        for (i, p) in f3_pkts.iter_mut().enumerate() {
+            crypt_media_payload(&secret, 3, i as u16, &mut p[HEADER_LEN..]);
+            p[2] |= FLAG_ENCRYPTED;
+        }
+        let mut f3_fec = generate_fec(3, false, 6000, &f3_pkts, 8);
+        for (i, p) in f3_pkts.iter_mut().enumerate() {
+            sign_packet_in_place(p, &secret);
+            ring.push(3, i as u16, p.clone());
+        }
+        for fp in &mut f3_fec {
+            sign_packet_in_place(fp, &secret);
+        }
+
+        let lossy_f3: Vec<Vec<u8>> = f3_pkts
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != 1 && *i != 3)
+            .map(|(_, p)| p.clone())
+            .collect();
+        assert!(feed(&mut r, &lossy_f3, 20).is_empty());
+        assert!(feed(&mut r, &f3_fec, 21).is_empty()); // Ainda faltam 2 fragmentos
+        let retrans_1 = ring.get(3, 1).unwrap();
+        let f3_events = feed(&mut r, &[(*retrans_1).clone()], 35); // Chega 1 via NACK -> FEC reconstrói o 3 na hora!
+        assert_eq!(f3_events.len(), 1);
+        match &f3_events[0] {
+            RxEvent::Frame { data, .. } => assert_eq!(data, &f3_plain),
+            _ => panic!("esperava entrega combinada NACK + FEC"),
+        }
+
+        // 4. Compatibilidade reversa com Host v0.5.2 (KIND_FEC sem FLAG_ENCRYPTED em quadro de 1 fragmento perdido)
+        let f4_plain = data(600, 0x77);
+        let mut f4_pkts = packetize(KIND_VIDEO, 4, false, 9000, &f4_plain);
+        crypt_media_payload(&secret, 4, 0, &mut f4_pkts[0][HEADER_LEN..]);
+        f4_pkts[0][2] |= FLAG_ENCRYPTED;
+        let mut f4_fec_legacy = generate_fec(4, false, 9000, &f4_pkts, 8);
+        f4_fec_legacy[0][2] &= !FLAG_ENCRYPTED; // Simula exatamente o bug de cabeçalho do Host v0.5.2
+        let f4_events = feed(&mut r, &f4_fec_legacy, 45);
+        assert_eq!(f4_events.len(), 1);
+        match &f4_events[0] {
+            RxEvent::Frame { data, .. } => assert_eq!(data, &f4_plain),
+            _ => panic!("esperava compatibilidade reversa com Host v0.5.2"),
+        }
+
+        // 5. Fallback dinâmico sem E2EE (viewer legado entrou na sala)
+        let f5_plain = data(2500, 0x99);
+        let f5_pkts = packetize(KIND_VIDEO, 5, true, 12000, &f5_plain);
+        let f5_fec = generate_fec(5, true, 12000, &f5_pkts, 4);
+        assert!(feed(&mut r, &f5_pkts[1..], 50).is_empty());
+        let f5_events = feed(&mut r, &f5_fec, 51);
+        assert_eq!(f5_events.len(), 1);
+        match &f5_events[0] {
+            RxEvent::Frame { data, .. } => assert_eq!(data, &f5_plain),
+            _ => panic!("esperava entrega limpa em modo misto não-cifrado"),
         }
     }
 }

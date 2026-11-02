@@ -211,6 +211,7 @@ async fn establish_host_session(
         peer_id: my_id,
         nick: my_nick.to_string(),
         udp_port: 0,
+        proto_ver: PROTO_E2EE_V2,
     };
     write_control(&mut send_ctrl, &watch_msg)
         .await
@@ -401,7 +402,9 @@ async fn run_single_session(
     });
 
     // Loop de datagramas de mídia (Host direto + Cascata Mesh autenticada)
+    let session_tok = stream_token;
     let mut reassembler = Reassembler::new();
+    reassembler.set_stream_token(session_tok);
     let mut audio_rx_stream = AudioStreamReceiver::new();
     reassembler.set_link_rtt_ms(active_quic_rtt_ms(&conn));
 
@@ -413,7 +416,6 @@ async fn run_single_session(
     let mut last_frames_delivered: u64 = 0;
     let mut last_pkts_rx: u64 = 0;
     let mut last_pkts_lost: u64 = 0;
-    let session_tok = stream_token;
 
     while !stop.load(Ordering::SeqCst) && session_alive.load(Ordering::SeqCst) {
         tokio::select! {
@@ -423,17 +425,11 @@ async fn run_single_session(
                     Ok(dg) => {
                         let now_ms = start_instant.elapsed().as_millis() as u64;
                         if let Some((mut h, payload)) = MediaHeader::parse(&dg) {
-                            let mut dec_payload = payload.to_vec();
-                            if (h.flags & FLAG_ENCRYPTED) != 0 {
-                                if let Some(tok) = session_tok {
-                                    crypt_media_payload(&tok, h.frame_id, h.frag_idx, &mut dec_payload);
-                                    h.flags &= !FLAG_ENCRYPTED;
-                                }
-                            }
-
                             match h.kind {
                                 KIND_VIDEO | KIND_FEC => {
-                                    let events = reassembler.push(&h, &dec_payload, now_ms);
+                                    // Mantém o payload cifrado até o fim da remontagem FEC para não corromper a paridade XOR!
+                                    reassembler.set_stream_token(session_tok);
+                                    let events = reassembler.push(&h, payload, now_ms);
                                     for ev in events {
                                         match ev {
                                             RxEvent::Frame { key, ts_90k, data, .. } => {
@@ -456,7 +452,20 @@ async fn run_single_session(
                                 }
                                 KIND_AUDIO => {
                                     if let Some(ref ap) = audio_player {
-                                        for pcm in audio_rx_stream.push_packet(&h, &dec_payload) {
+                                        let mut dec_audio;
+                                        let audio_payload: &[u8] = if (h.flags & FLAG_ENCRYPTED) != 0 {
+                                            if let Some(tok) = session_tok {
+                                                dec_audio = payload.to_vec();
+                                                crypt_media_payload(&tok, h.frame_id, h.frag_idx, &mut dec_audio);
+                                                h.flags &= !FLAG_ENCRYPTED;
+                                                &dec_audio
+                                            } else {
+                                                payload
+                                            }
+                                        } else {
+                                            payload
+                                        };
+                                        for pcm in audio_rx_stream.push_packet(&h, audio_payload) {
                                             ap.push_samples(&pcm);
                                         }
                                     }
@@ -490,17 +499,10 @@ async fn run_single_session(
                 last_relayed_rx = Instant::now();
                 let now_ms = start_instant.elapsed().as_millis() as u64;
                 if let Some((mut h, payload)) = MediaHeader::parse(&mesh_dg) {
-                    let mut dec_payload = payload.to_vec();
-                    if (h.flags & FLAG_ENCRYPTED) != 0 {
-                        if let Some(tok) = expected_tok {
-                            crypt_media_payload(&tok, h.frame_id, h.frag_idx, &mut dec_payload);
-                            h.flags &= !FLAG_ENCRYPTED;
-                        }
-                    }
-
                     match h.kind {
                         KIND_VIDEO | KIND_FEC => {
-                            let events = reassembler.push(&h, &dec_payload, now_ms);
+                            reassembler.set_stream_token(expected_tok);
+                            let events = reassembler.push(&h, payload, now_ms);
                             for ev in events {
                                 match ev {
                                     RxEvent::Frame { key, ts_90k, data, .. } => {
@@ -520,7 +522,20 @@ async fn run_single_session(
                         }
                         KIND_AUDIO => {
                             if let Some(ref ap) = audio_player {
-                                for pcm in audio_rx_stream.push_packet(&h, &dec_payload) {
+                                let mut dec_audio;
+                                let audio_payload: &[u8] = if (h.flags & FLAG_ENCRYPTED) != 0 {
+                                    if let Some(tok) = expected_tok {
+                                        dec_audio = payload.to_vec();
+                                        crypt_media_payload(&tok, h.frame_id, h.frag_idx, &mut dec_audio);
+                                        h.flags &= !FLAG_ENCRYPTED;
+                                        &dec_audio
+                                    } else {
+                                        payload
+                                    }
+                                } else {
+                                    payload
+                                };
+                                for pcm in audio_rx_stream.push_packet(&h, audio_payload) {
                                     ap.push_samples(&pcm);
                                 }
                             }
@@ -954,12 +969,35 @@ mod tests {
         assert_eq!(host_mgr.viewers_count(), 1);
         assert!(pli_called.load(Ordering::SeqCst));
 
-        // 1. Testa entrega binária VideoBin (sem Base64!)
-        let frame_data = vec![0x12; 2500];
-        let pkts = packetize(KIND_VIDEO, 1, true, 9000, &frame_data);
+        // 1. Testa entrega binária VideoBin (sem Base64!) + E2EE v2 com perda recuperada via FEC em QUIC real!
+        let frame_data: Vec<u8> = (0..2500).map(|i| (i as u8).wrapping_mul(7).wrapping_add(3)).collect();
+        let mut pkts = packetize(KIND_VIDEO, 1, true, 9000, &frame_data);
         let viewers = host_mgr.active_viewers();
-        for p in pkts {
-            let b = Bytes::copy_from_slice(&p);
+        assert_eq!(viewers[0].proto_ver, PROTO_E2EE_V2);
+        let tok = host_mgr.stream_token;
+        for (i, p) in pkts.iter_mut().enumerate() {
+            crypt_media_payload(&tok, 1, i as u16, &mut p[HEADER_LEN..]);
+            p[2] |= FLAG_ENCRYPTED;
+        }
+        let mut fec_pkts = crate::net::transport::generate_fec(1, true, 9000, &pkts, 4);
+        for p in &mut pkts {
+            sign_packet_in_place(p, &tok);
+        }
+        for fp in &mut fec_pkts {
+            sign_packet_in_place(fp, &tok);
+        }
+
+        // Envia apenas fragmentos 0 e 2 (dropa o fragmento 1 no meio!) + paridade FEC
+        for (i, p) in pkts.iter().enumerate() {
+            if i != 1 {
+                let b = Bytes::copy_from_slice(p);
+                for v in &viewers {
+                    let _ = v.send_datagram(b.clone());
+                }
+            }
+        }
+        for fp in &fec_pkts {
+            let b = Bytes::copy_from_slice(fp);
             for v in &viewers {
                 let _ = v.send_datagram(b.clone());
             }
@@ -971,7 +1009,7 @@ mod tests {
             if let Ok(StreamEvent::VideoBin { key, pts, data }) = ev_rx.try_recv() {
                 assert!(key);
                 assert_eq!(pts, 9000);
-                assert_eq!(data.len(), 2500);
+                assert_eq!(data, frame_data, "E2EE + FEC via QUIC real deve entregar bitstream idêntico!");
                 got_video = true;
                 break;
             }

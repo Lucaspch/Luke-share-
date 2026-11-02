@@ -43,6 +43,7 @@ if ($Version -ne "" -and $Version -ne $currentVer) {
     # Atualiza index.html tag
     $htmlContent = [System.IO.File]::ReadAllText($htmlPath, [System.Text.Encoding]::UTF8)
     $htmlContent = [regex]::Replace($htmlContent, '(?<=class="version-tag"[^>]*>v)[0-9\.]+', $Version)
+    $htmlContent = [regex]::Replace($htmlContent, '(?<=id="update-curr-version"[^>]*>v)[0-9\.]+', $Version)
     [System.IO.File]::WriteAllText($htmlPath, $htmlContent, $utf8NoBom)
     
     $currentVer = $Version
@@ -83,7 +84,9 @@ if (Test-Path $crtLib) {
 
 $env:PATH = "C:\Program Files\CMake\bin;C:\Program Files\LLVM\bin;$env:USERPROFILE\.cargo\bin;" + $env:PATH
 
-# 3. Compilação Release com Tauri
+# 3. Compilação Release com Tauri (encerra instâncias locais que bloqueiem target\release\luke-share.exe)
+Get-Process -Name "Luke-Share", "luke-share" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 300
 Write-Host "Compilando binario e instalador assinado..." -ForegroundColor Yellow
 npx tauri build
 
