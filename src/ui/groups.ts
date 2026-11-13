@@ -110,19 +110,36 @@ export class GroupsUI {
     active_room_id: null,
     pending_invites: [],
   };
+  private autoWatchCheckbox = document.getElementById("group-autowatch-checkbox") as HTMLInputElement | null;
   private isSidebarCollapsed = false;
+  private autoWatch = localStorage.getItem("luke_group_auto_watch") !== "false";
+  private dismissedTickets = new Set<string>();
+  private manualTickets = new Set<string>();
+  private lastRoomKey: string | null = null;
   private lastOpener: HTMLElement | null = null;
   private pollTimer: number | null = null;
 
   private onToast: (msg: string, icon?: string) => void;
-  private onDesiredRoomStreams: (inRoom: boolean, groupName: string | null, roomName: string | null, desired: DesiredGroupStream[]) => void;
+  private onDesiredRoomStreams: (
+    inRoom: boolean,
+    groupName: string | null,
+    roomName: string | null,
+    desired: DesiredGroupStream[],
+    allAvailable: DesiredGroupStream[]
+  ) => void;
   private onModeChange: (mode: "private" | "group") => void;
   private onRequestScreenShare: () => void;
   private onRequestWebcamToggle: () => void;
 
   constructor(opts: {
     onToast: (msg: string, icon?: string) => void;
-    onDesiredRoomStreams: (inRoom: boolean, groupName: string | null, roomName: string | null, desired: DesiredGroupStream[]) => void;
+    onDesiredRoomStreams: (
+      inRoom: boolean,
+      groupName: string | null,
+      roomName: string | null,
+      desired: DesiredGroupStream[],
+      allAvailable: DesiredGroupStream[]
+    ) => void;
     onModeChange: (mode: "private" | "group") => void;
     onRequestScreenShare: () => void;
     onRequestWebcamToggle: () => void;
@@ -307,6 +324,32 @@ export class GroupsUI {
     this.btnQuickScreen.addEventListener("click", () => this.onRequestScreenShare());
     this.btnQuickCam.addEventListener("click", () => this.onRequestWebcamToggle());
 
+    if (this.autoWatchCheckbox) {
+      this.autoWatchCheckbox.checked = this.autoWatch;
+      this.autoWatchCheckbox.addEventListener("change", () => {
+        const next = Boolean(this.autoWatchCheckbox?.checked);
+        const currentAvailable = this.getCurrentRoomAvailableStreams();
+        if (!next && this.autoWatch) {
+          this.manualTickets.clear();
+          for (const s of currentAvailable) {
+            if (!this.dismissedTickets.has(s.ticket)) {
+              this.manualTickets.add(s.ticket);
+            }
+          }
+          this.dismissedTickets.clear();
+          this.onToast("Modo econômico: clique em qual live quer assistir", "tune");
+        } else if (next && !this.autoWatch) {
+          this.dismissedTickets.clear();
+          this.manualTickets.clear();
+          this.onToast("Lives da sala abrirão automaticamente ao entrar", "visibility");
+        }
+        this.autoWatch = next;
+        localStorage.setItem("luke_group_auto_watch", next ? "true" : "false");
+        this.syncDesiredStreams();
+        this.render();
+      });
+    }
+
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         if (!this.groupModal.classList.contains("hidden")) this.closeModal(this.groupModal);
@@ -437,26 +480,53 @@ export class GroupsUI {
     } catch (_) {}
   }
 
-  private syncDesiredStreams() {
+  public isStreamWanted(ticket: string): boolean {
+    return this.autoWatch
+      ? !this.dismissedTickets.has(ticket)
+      : this.manualTickets.has(ticket);
+  }
+
+  public setStreamWanted(stream: DesiredGroupStream, wanted: boolean) {
+    if (this.autoWatch) {
+      if (wanted) this.dismissedTickets.delete(stream.ticket);
+      else this.dismissedTickets.add(stream.ticket);
+    } else {
+      if (wanted) this.manualTickets.add(stream.ticket);
+      else this.manualTickets.delete(stream.ticket);
+    }
+    this.syncDesiredStreams();
+    this.render();
+  }
+
+  public markStreamStopped(ticket: string) {
+    if (this.autoWatch) this.dismissedTickets.add(ticket);
+    else this.manualTickets.delete(ticket);
+    this.render();
+  }
+
+  public watchAllAvailable() {
+    this.dismissedTickets.clear();
+    for (const s of this.getCurrentRoomAvailableStreams()) {
+      this.manualTickets.add(s.ticket);
+    }
+    this.syncDesiredStreams();
+    this.render();
+  }
+
+  public getCurrentRoomAvailableStreams(): DesiredGroupStream[] {
     const gid = this.state.active_group_id;
     const rid = this.state.active_room_id;
-    if (!gid || !rid) {
-      this.onDesiredRoomStreams(false, null, null, []);
-      return;
-    }
+    if (!gid || !rid) return [];
 
     const grp = this.state.groups.find((g) => g.id === gid);
     const room = grp?.rooms.find((r) => r.id === rid);
-    if (!grp || !room) {
-      this.onDesiredRoomStreams(false, null, null, []);
-      return;
-    }
+    if (!grp || !room) return [];
 
-    const desired: DesiredGroupStream[] = [];
+    const available: DesiredGroupStream[] = [];
     for (const p of room.participants) {
       if (p.is_self) continue;
       if (p.has_screen && p.screen_ticket) {
-        desired.push({
+        available.push({
           streamKey: `grp:${p.tag}:screen`,
           ticket: p.screen_ticket,
           nick: `${p.nick} — Tela`,
@@ -464,7 +534,7 @@ export class GroupsUI {
         });
       }
       if (p.has_camera && p.camera_ticket) {
-        desired.push({
+        available.push({
           streamKey: `grp:${p.tag}:camera`,
           ticket: p.camera_ticket,
           nick: `${p.nick} — Webcam`,
@@ -472,8 +542,46 @@ export class GroupsUI {
         });
       }
     }
+    return available;
+  }
 
-    this.onDesiredRoomStreams(true, grp.name, room.name, desired);
+  private syncDesiredStreams() {
+    const gid = this.state.active_group_id;
+    const rid = this.state.active_room_id;
+    if (!gid || !rid) {
+      this.lastRoomKey = null;
+      this.dismissedTickets.clear();
+      this.manualTickets.clear();
+      this.onDesiredRoomStreams(false, null, null, [], []);
+      return;
+    }
+
+    const grp = this.state.groups.find((g) => g.id === gid);
+    const room = grp?.rooms.find((r) => r.id === rid);
+    if (!grp || !room) {
+      this.lastRoomKey = null;
+      this.onDesiredRoomStreams(false, null, null, [], []);
+      return;
+    }
+
+    const roomKey = `${gid}:${rid}`;
+    if (roomKey !== this.lastRoomKey) {
+      this.lastRoomKey = roomKey;
+      this.dismissedTickets.clear();
+      this.manualTickets.clear();
+    }
+
+    const available = this.getCurrentRoomAvailableStreams();
+    const activeTickets = new Set(available.map((a) => a.ticket));
+    for (const t of Array.from(this.dismissedTickets)) {
+      if (!activeTickets.has(t)) this.dismissedTickets.delete(t);
+    }
+    for (const t of Array.from(this.manualTickets)) {
+      if (!activeTickets.has(t)) this.manualTickets.delete(t);
+    }
+
+    const desired = available.filter((d) => this.isStreamWanted(d.ticket));
+    this.onDesiredRoomStreams(true, grp.name, room.name, desired, available);
   }
 
   private renderPendingInvites() {
@@ -604,16 +712,61 @@ export class GroupsUI {
           const prow = document.createElement("div");
           prow.className = `room-participant-row ${p.is_self ? "is-self" : ""}`;
 
+          const trackBtns: { stream: DesiredGroupStream; watching: boolean }[] = [];
           const chips: string[] = [];
           if (p.has_screen) {
-            chips.push(
-              `<span class="participant-track-chip screen"><span class="material-symbols-rounded ms-xs">desktop_windows</span><span>Tela</span></span>`
-            );
+            if (isJoined && !p.is_self && p.screen_ticket) {
+              const streamObj: DesiredGroupStream = {
+                streamKey: `grp:${p.tag}:screen`,
+                ticket: p.screen_ticket,
+                nick: `${p.nick} — Tela`,
+                kind: "screen",
+              };
+              const watching = this.isStreamWanted(p.screen_ticket);
+              trackBtns.push({ stream: streamObj, watching });
+              chips.push(
+                `<button type="button" class="participant-track-chip screen interactive ${
+                  watching ? "watching" : "paused"
+                }" data-track-idx="${trackBtns.length - 1}" aria-pressed="${watching}" title="${
+                  watching
+                    ? "Assistindo — clique para parar de assistir esta tela"
+                    : "Pausada — clique para assistir esta tela"
+                }"><span class="material-symbols-rounded ms-xs">${
+                  watching ? "visibility" : "play_arrow"
+                }</span><span>${watching ? "Tela" : "Ver Tela"}</span></button>`
+              );
+            } else {
+              chips.push(
+                `<span class="participant-track-chip screen"><span class="material-symbols-rounded ms-xs">desktop_windows</span><span>Tela</span></span>`
+              );
+            }
           }
           if (p.has_camera) {
-            chips.push(
-              `<span class="participant-track-chip cam"><span class="material-symbols-rounded ms-xs">videocam</span><span>Cam</span></span>`
-            );
+            if (isJoined && !p.is_self && p.camera_ticket) {
+              const streamObj: DesiredGroupStream = {
+                streamKey: `grp:${p.tag}:camera`,
+                ticket: p.camera_ticket,
+                nick: `${p.nick} — Webcam`,
+                kind: "camera",
+              };
+              const watching = this.isStreamWanted(p.camera_ticket);
+              trackBtns.push({ stream: streamObj, watching });
+              chips.push(
+                `<button type="button" class="participant-track-chip cam interactive ${
+                  watching ? "watching" : "paused"
+                }" data-track-idx="${trackBtns.length - 1}" aria-pressed="${watching}" title="${
+                  watching
+                    ? "Assistindo — clique para parar de assistir esta webcam"
+                    : "Pausada — clique para assistir esta webcam"
+                }"><span class="material-symbols-rounded ms-xs">${
+                  watching ? "videocam" : "play_arrow"
+                }</span><span>${watching ? "Cam" : "Ver Cam"}</span></button>`
+              );
+            } else {
+              chips.push(
+                `<span class="participant-track-chip cam"><span class="material-symbols-rounded ms-xs">videocam</span><span>Cam</span></span>`
+              );
+            }
           }
           if (chips.length === 0) {
             chips.push(`<span class="participant-track-chip idle">Na sala</span>`);
@@ -624,6 +777,24 @@ export class GroupsUI {
             <span class="participant-nick">${this.escapeHtml(p.nick)}${p.is_self ? " (Você)" : ""}</span>
             <div class="participant-chips">${chips.join("")}</div>
           `;
+          if (trackBtns.length > 0) {
+            prow.querySelectorAll<HTMLButtonElement>(".participant-track-chip.interactive").forEach((btn) => {
+              const idx = parseInt(btn.dataset.trackIdx || "-1", 10);
+              const entry = trackBtns[idx];
+              if (!entry) return;
+              btn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                const nextWanted = !entry.watching;
+                this.setStreamWanted(entry.stream, nextWanted);
+                this.onToast(
+                  nextWanted
+                    ? `Abrindo ${entry.stream.nick}`
+                    : `Parou de assistir ${entry.stream.nick}`,
+                  nextWanted ? "visibility" : "visibility_off"
+                );
+              });
+            });
+          }
           plist.appendChild(prow);
         }
         roomBlock.appendChild(plist);

@@ -3347,6 +3347,115 @@ body.mini-player-active .group-empty-stage {
 /* --------------------------------------------------------------------------
    5. ACESSIBILIDADE E PREFERÊNCIA DE MOVIMENTO
    -------------------------------------------------------------------------- */
+/* --------------------------------------------------------------------------
+   4B. CONTROLE SELETIVO DE STREAMS NA SALA (PAUSAR / ASSISTIR INDIVIDUAL)
+   -------------------------------------------------------------------------- */
+.group-autowatch-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  border-radius: var(--radius-xs);
+  background: rgba(2, 10, 18, 0.45);
+  border: 1px solid rgba(56, 189, 248, 0.12);
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.group-autowatch-toggle input[type="checkbox"] {
+  accent-color: var(--accent-cyan);
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+
+.group-sidebar.collapsed .group-autowatch-toggle {
+  display: none;
+}
+
+.participant-track-chip.interactive {
+  cursor: pointer;
+  transition: transform 0.1s ease, filter 0.15s ease, opacity 0.15s ease, border-color 0.15s ease;
+}
+
+.participant-track-chip.interactive:active {
+  transform: scale(0.95);
+}
+
+.participant-track-chip.interactive.paused {
+  opacity: 0.68;
+  background: rgba(15, 23, 42, 0.7);
+  border-style: dashed;
+  color: var(--text-secondary);
+}
+
+@media (hover: hover) {
+  .participant-track-chip.interactive:hover {
+    filter: brightness(1.16);
+    opacity: 1;
+  }
+}
+
+.group-available-streams {
+  width: 100%;
+  margin: 4px 0 6px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  background: rgba(2, 10, 18, 0.62);
+  border: 1px solid rgba(56, 189, 248, 0.22);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  text-align: left;
+}
+
+.available-streams-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.76rem;
+  font-weight: 800;
+  color: var(--accent-cyan-bright);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.available-streams-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.available-stream-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(56, 189, 248, 0.34);
+  background: rgba(14, 165, 233, 0.16);
+  color: var(--text-primary);
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+
+@media (hover: hover) {
+  .available-stream-pill:hover {
+    background: rgba(14, 165, 233, 0.3);
+    border-color: rgba(125, 211, 252, 0.65);
+  }
+}
+
+.available-stream-pill:active {
+  transform: scale(0.96);
+}
+
 button:focus-visible,
 a:focus-visible,
 select:focus-visible,

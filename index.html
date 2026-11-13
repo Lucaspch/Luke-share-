@@ -252,6 +252,13 @@
                 <span class="material-symbols-rounded ms-xs">add</span>
               </button>
             </div>
+            <label
+              class="group-autowatch-toggle"
+              title="Quando ativado, abre as lives da sala automaticamente ao entrar. Desative em PCs mais fracos para escolher manualmente qual tela assistir."
+            >
+              <input type="checkbox" id="group-autowatch-checkbox" checked />
+              <span>Abrir lives ao entrar</span>
+            </label>
             <div id="group-rooms-list" class="group-rooms-list"></div>
           </div>
 
@@ -297,6 +304,7 @@
               <p id="group-empty-room-desc">
                 Você está na sala. Não há chamada de voz aqui — transmita sua tela ou ligue sua webcam abaixo para quem entrar assistir automaticamente.
               </p>
+              <div id="group-available-streams" class="group-available-streams hidden"></div>
               <div class="group-empty-actions">
                 <button type="button" id="btn-empty-room-share" class="btn-primary btn-sm">
                   <span class="material-symbols-rounded ms-sm">screen_share</span>

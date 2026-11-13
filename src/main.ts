@@ -67,6 +67,8 @@ class App {
   private watchPanel = document.getElementById("watch-panel") as HTMLElement;
   private groupEmptyStage = document.getElementById("group-empty-stage") as HTMLElement;
   private groupEmptyRoomTitle = document.getElementById("group-empty-room-title") as HTMLElement;
+  private groupEmptyRoomDesc = document.getElementById("group-empty-room-desc") as HTMLElement | null;
+  private groupAvailableStreamsEl = document.getElementById("group-available-streams") as HTMLElement | null;
   private btnEmptyRoomShare = document.getElementById("btn-empty-room-share") as HTMLButtonElement | null;
   private btnEmptyRoomCam = document.getElementById("btn-empty-room-cam") as HTMLButtonElement | null;
 
@@ -85,7 +87,9 @@ class App {
   private btnExitMiniPlayer = document.getElementById("btn-exit-mini-player") as HTMLButtonElement | null;
 
   private activeGroupSyncPending = false;
+  private needsGroupResync = false;
   private currentGroupRoomName: string | null = null;
+  private currentGroupAvailableStreams: DesiredGroupStream[] = [];
 
   constructor() {
     this.init();
@@ -454,12 +458,17 @@ class App {
           this.closeAllGroupStreams();
         }
       },
-      onDesiredRoomStreams: async (inRoom, _groupName, roomName, desired) => {
-        if (this.activeGroupSyncPending) return;
+      onDesiredRoomStreams: async (inRoom, _groupName, roomName, desired, allAvailable) => {
+        this.currentGroupAvailableStreams = inRoom ? (allAvailable || []) : [];
+        if (this.activeGroupSyncPending) {
+          this.needsGroupResync = true;
+          return;
+        }
         this.activeGroupSyncPending = true;
         try {
           if (!inRoom) {
             this.currentGroupRoomName = null;
+            this.currentGroupAvailableStreams = [];
             this.groupEmptyStage.classList.add("hidden");
             await this.closeAllGroupStreams();
             return;
@@ -471,7 +480,7 @@ class App {
             desiredMap.set(d.streamKey, d);
           }
 
-          // 1. Remove streams de grupo que encerraram ou mudaram de ticket
+          // 1. Remove streams de grupo que encerraram, mudaram de ticket ou o usuário parou de assistir
           for (const [id, st] of Array.from(this.activeStreams.entries())) {
             if (!st.isGroupStream) continue;
             const wanted = desiredMap.get(id);
@@ -480,7 +489,7 @@ class App {
             }
           }
 
-          // 2. Inicia novas streams da sala automaticamente
+          // 2. Abre apenas as streams da sala selecionadas/permitidas
           for (const d of desired) {
             if (!this.activeStreams.has(d.streamKey)) {
               await this.startWatchingPeer(d.ticket, d.nick, d.streamKey, d.kind, true);
@@ -490,6 +499,10 @@ class App {
           this.refreshStageVisibility();
         } finally {
           this.activeGroupSyncPending = false;
+          if (this.needsGroupResync) {
+            this.needsGroupResync = false;
+            this.groupsUI?.refreshState();
+          }
         }
       },
     });
@@ -522,11 +535,72 @@ class App {
       this.sharePanel.classList.add("hidden");
       this.groupEmptyStage.classList.remove("hidden");
       this.groupEmptyRoomTitle.textContent = `Sala # ${this.currentGroupRoomName || "Geral"}`;
+      this.renderAvailableGroupStreams();
     } else {
       this.groupEmptyStage.classList.add("hidden");
       this.watchPanel.classList.add("hidden");
       this.sharePanel.classList.remove("hidden");
     }
+  }
+
+  private renderAvailableGroupStreams() {
+    if (!this.groupAvailableStreamsEl) return;
+    const available = this.currentGroupAvailableStreams || [];
+    if (available.length === 0) {
+      this.groupAvailableStreamsEl.classList.add("hidden");
+      this.groupAvailableStreamsEl.innerHTML = "";
+      if (this.groupEmptyRoomDesc) {
+        this.groupEmptyRoomDesc.textContent =
+          "Você está na sala. Não há chamada de voz aqui — transmita sua tela ou ligue sua webcam abaixo para quem entrar assistir automaticamente.";
+      }
+      return;
+    }
+
+    if (this.groupEmptyRoomDesc) {
+      this.groupEmptyRoomDesc.textContent =
+        "Escolha abaixo quem você quer assistir nesta sala (economiza CPU/GPU quando não quiser abrir todas as telas).";
+    }
+
+    this.groupAvailableStreamsEl.classList.remove("hidden");
+    this.groupAvailableStreamsEl.innerHTML = `
+      <div class="available-streams-header">
+        <span>Lives ativas nesta sala (${available.length})</span>
+        <button type="button" class="btn-secondary btn-xs" id="btn-watch-all-group">
+          <span class="material-symbols-rounded ms-xs">grid_view</span>
+          <span>Assistir Todas</span>
+        </button>
+      </div>
+      <div class="available-streams-list">
+        ${available
+          .map(
+            (s, i) => `
+          <button type="button" class="available-stream-pill" data-avail-idx="${i}">
+            <span class="material-symbols-rounded ms-xs">${s.kind === "camera" ? "videocam" : "desktop_windows"}</span>
+            <span>Assistir ${this.escapeHtml(s.nick)}</span>
+            <span class="material-symbols-rounded ms-xs">play_arrow</span>
+          </button>
+        `
+          )
+          .join("")}
+      </div>
+    `;
+
+    this.groupAvailableStreamsEl
+      .querySelector("#btn-watch-all-group")
+      ?.addEventListener("click", () => {
+        this.groupsUI?.watchAllAvailable();
+      });
+
+    this.groupAvailableStreamsEl
+      .querySelectorAll<HTMLButtonElement>(".available-stream-pill")
+      .forEach((btn) => {
+        const idx = parseInt(btn.dataset.availIdx || "-1", 10);
+        const item = available[idx];
+        if (!item) return;
+        btn.addEventListener("click", () => {
+          this.groupsUI?.setStreamWanted(item, true);
+        });
+      });
   }
 
   private bindEvents() {
@@ -812,13 +886,11 @@ class App {
         <button class="btn-tile-icon btn-tile-focus" title="Focar/Expandir este stream (ou dê duplo clique)">
           <span class="material-symbols-rounded ms-sm">open_in_full</span>
         </button>
-        ${
-          isGroupStream
-            ? ""
-            : `<button class="btn-tile-icon btn-tile-close" title="Desconectar desta transmissão">
+        <button class="btn-tile-icon btn-tile-close" title="${
+          isGroupStream ? "Parar de assistir esta transmissão" : "Desconectar desta transmissão"
+        }">
           <span class="material-symbols-rounded ms-sm">close</span>
-        </button>`
-        }
+        </button>
       </div>
     `;
 
@@ -945,6 +1017,10 @@ class App {
 
     if (btnClose) {
       btnClose.addEventListener("click", () => {
+        if (isGroupStream) {
+          this.groupsUI?.markStreamStopped(peerTarget);
+          this.showToast(`Parou de assistir ${displayHost}`, "visibility_off");
+        }
         this.stopWatchingPeer(streamId);
       });
     }
