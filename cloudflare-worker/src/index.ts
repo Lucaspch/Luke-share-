@@ -117,6 +117,30 @@ export default {
         }
       }
 
+      // 1b. Seed Zero-Knowledge de Grupos Persistentes (AES-256-GCM, TTL 30 dias)
+      if (path.startsWith("/v1/group/")) {
+        const hash = path.slice("/v1/group/".length).trim();
+        if (!/^[0-9a-f]{32,64}$/.test(hash)) {
+          return new Response("Invalid group hash", { status: 400 });
+        }
+        const kvKey = `group:${hash}`;
+
+        if (request.method === "PUT") {
+          const body = (await request.text()).trim();
+          if (!body || body.length > 32768) {
+            return new Response("Invalid payload size", { status: 400 });
+          }
+          await env.LUKE_KV.put(kvKey, body, { expirationTtl: 2592000 });
+          return new Response("OK", { status: 200 });
+        }
+
+        if (request.method === "GET") {
+          const val = await env.LUKE_KV.get(kvKey);
+          if (!val) return new Response("Not Found", { status: 404 });
+          return new Response(val, { status: 200 });
+        }
+      }
+
       // 2. Registro de Tag Ed25519
       if (path === "/v1/tag/register" && request.method === "POST") {
         const card = (await request.json()) as TagCard;

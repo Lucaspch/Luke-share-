@@ -1,6 +1,8 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { ShareManager } from "./ui/share";
+import { CameraManager } from "./ui/camera";
+import { GroupsUI, DesiredGroupStream } from "./ui/groups";
 import {
   StreamPlayer,
   StreamEvent,
@@ -19,8 +21,11 @@ interface MyInfo {
 
 interface ActiveStream {
   id: string;
+  ticket: string;
   nick: string;
   addr: string;
+  kind: "screen" | "camera";
+  isGroupStream: boolean;
   player: StreamPlayer;
   element: HTMLElement;
   statBadge: HTMLElement;
@@ -30,6 +35,8 @@ interface ActiveStream {
 
 class App {
   private shareManager!: ShareManager;
+  private cameraManager!: CameraManager;
+  private groupsUI!: GroupsUI;
   private updaterManager!: UpdaterManager;
   private friendsUI!: FriendsUI;
   private myInfo: MyInfo | null = null;
@@ -39,9 +46,11 @@ class App {
   private activeStreams = new Map<string, ActiveStream>();
   private focusedStreamId: string | null = null;
 
-  // Stream preview do Host na Grade (quando anfitrião está na chamada)
+  // Stream preview do Host na Grade (Tela e Webcam independentes)
   private hostTileElement: HTMLElement | null = null;
   private hostTilePlayer: StreamPlayer | null = null;
+  private cameraTileElement: HTMLElement | null = null;
+  private cameraTilePlayer: StreamPlayer | null = null;
 
   // Elementos do Cabeçalho
   private myIpEl = document.getElementById("my-ip") as HTMLElement;
@@ -56,6 +65,10 @@ class App {
   // Painéis Principais do Palco
   private sharePanel = document.getElementById("share-panel") as HTMLElement;
   private watchPanel = document.getElementById("watch-panel") as HTMLElement;
+  private groupEmptyStage = document.getElementById("group-empty-stage") as HTMLElement;
+  private groupEmptyRoomTitle = document.getElementById("group-empty-room-title") as HTMLElement;
+  private btnEmptyRoomShare = document.getElementById("btn-empty-room-share") as HTMLButtonElement | null;
+  private btnEmptyRoomCam = document.getElementById("btn-empty-room-cam") as HTMLButtonElement | null;
 
   // Elementos da Chamada / Multi-Stream e Dock Inferior
   private streamsGridWrapper = document.getElementById("streams-grid-wrapper") as HTMLElement;
@@ -63,11 +76,16 @@ class App {
   private streamsCountBadge = document.getElementById("streams-count-badge") as HTMLElement;
   private gridModeLabel = document.getElementById("grid-mode-label") as HTMLElement | null;
   private btnCallShare = document.getElementById("btn-call-share") as HTMLButtonElement;
+  private btnCallWebcam = document.getElementById("btn-call-webcam") as HTMLButtonElement;
+  private callWebcamIcon = document.getElementById("call-webcam-icon") as HTMLElement | null;
   private btnCallGridMode = document.getElementById("btn-call-grid-mode") as HTMLButtonElement;
   private btnStopAllWatch = document.getElementById("btn-stop-all-watch") as HTMLButtonElement;
   private btnFullscreen = document.getElementById("btn-fullscreen") as HTMLButtonElement;
   private btnMiniPlayer = document.getElementById("btn-mini-player") as HTMLButtonElement | null;
   private btnExitMiniPlayer = document.getElementById("btn-exit-mini-player") as HTMLButtonElement | null;
+
+  private activeGroupSyncPending = false;
+  private currentGroupRoomName: string | null = null;
 
   constructor() {
     this.init();
@@ -77,6 +95,8 @@ class App {
     await this.fetchMyInfo();
     this.initPeers();
     this.initShare();
+    this.initCamera();
+    this.initGroups();
     this.friendsUI = new FriendsUI(
       this.myInfo?.tag || "",
       (roomTicket, hostNick) => {
@@ -137,7 +157,9 @@ class App {
   }
 
   private updateStatusPill() {
-    const isSharing = this.shareManager ? this.shareManager.getIsSharing() : false;
+    const isSharing =
+      (this.shareManager ? this.shareManager.getIsSharing() : false) ||
+      (this.cameraManager ? this.cameraManager.getIsSharing() : false);
     const watchCount = this.activeStreams.size;
 
     this.myStatusEl.className = "status-pill";
@@ -185,6 +207,16 @@ class App {
           "Isso é uma Tag de Amigo (LK#XXXX)! Clique em 'Amigos' no topo direito para adicioná-lo.",
           "group_add"
         );
+        return;
+      }
+      if (/^LKG-[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$/i.test(val) || val.startsWith("lkg-")) {
+        manualIpInput.value = "";
+        invoke("join_group_by_code", { code: val })
+          .then(async (g: any) => {
+            this.showToast(`Você entrou no grupo "${g.name}"!`, "group_add");
+            await this.groupsUI.refreshState();
+          })
+          .catch((e) => this.showToast(String(e), "error"));
         return;
       }
       if (!this.isValidRoomCode(val)) {
@@ -277,6 +309,7 @@ class App {
           }
 
           // Entra imediatamente no Palco de Transmissão (Grade 1 / 2 / 4 Streams)
+          this.groupEmptyStage.classList.add("hidden");
           this.sharePanel.classList.add("hidden");
           this.watchPanel.classList.remove("hidden");
           this.renderHostTile();
@@ -296,6 +329,8 @@ class App {
           }
           this.removeHostTile();
         }
+        this.groupsUI?.updateQuickTrackButtons(streaming, this.cameraManager?.getIsSharing() || false);
+        this.groupsUI?.refreshState();
         this.updateStatusPill();
         this.updateGridLayout();
       }
@@ -331,6 +366,169 @@ class App {
     };
   }
 
+  private initCamera() {
+    this.cameraManager = new CameraManager(
+      {
+        modalBackdrop: document.getElementById("webcam-modal") as HTMLElement,
+        btnClose: document.getElementById("btn-close-webcam-modal") as HTMLButtonElement,
+        btnCancel: document.getElementById("btn-cancel-webcam-modal") as HTMLButtonElement,
+        btnStart: document.getElementById("btn-start-webcam") as HTMLButtonElement,
+        btnRefresh: document.getElementById("btn-refresh-cameras") as HTMLButtonElement,
+        deviceSelect: document.getElementById("webcam-device-select") as HTMLSelectElement,
+        resolutionSelect: document.getElementById("webcam-resolution-select") as HTMLSelectElement,
+        fpsSelect: document.getElementById("webcam-fps-select") as HTMLSelectElement,
+        mirrorCheckbox: document.getElementById("webcam-mirror-checkbox") as HTMLInputElement,
+        emptyNotice: document.getElementById("webcam-empty-notice") as HTMLElement,
+      },
+      (active, mirrored) => {
+        this.btnCallWebcam.classList.toggle("active-share", active);
+        if (this.callWebcamIcon) {
+          this.callWebcamIcon.textContent = active ? "videocam_off" : "videocam";
+        }
+        this.btnCallWebcam.title = active
+          ? "Desligar Webcam"
+          : "Ligar Webcam (sem áudio de microfone)";
+
+        if (active) {
+          this.groupEmptyStage.classList.add("hidden");
+          this.sharePanel.classList.add("hidden");
+          this.watchPanel.classList.remove("hidden");
+          this.renderHostCameraTile(mirrored);
+        } else {
+          this.removeHostCameraTile();
+        }
+        this.groupsUI?.updateQuickTrackButtons(this.shareManager?.getIsSharing() || false, active);
+        this.groupsUI?.refreshState();
+        this.updateStatusPill();
+        this.updateGridLayout();
+      },
+      (msg) => {
+        if (!this.cameraTilePlayer) return;
+        const bin = extractBinaryBuffer(msg);
+        if (bin) {
+          this.cameraTilePlayer.handleBinaryVideoPacket(bin);
+          return;
+        }
+        const ev = msg as StreamEvent;
+        if (ev.t === "config") {
+          if (ev.width && ev.height) this.cameraTilePlayer.setDimensions(ev.width, ev.height);
+          if (ev.codec) this.cameraTilePlayer.configureDecoder(ev.codec);
+        }
+      },
+      (msg, icon) => this.showToast(msg, icon)
+    );
+  }
+
+  private initGroups() {
+    const toggleScreenAction = () => {
+      if (this.shareManager.getIsSharing()) {
+        this.shareManager.openShareModal(true);
+      } else {
+        this.shareManager.openShareModal(false);
+      }
+    };
+    const toggleCamAction = () => {
+      if (this.cameraManager.getIsSharing()) {
+        this.cameraManager.stopCamera();
+      } else {
+        this.cameraManager.openModal(this.btnCallWebcam);
+      }
+    };
+
+    if (this.btnEmptyRoomShare) {
+      this.btnEmptyRoomShare.addEventListener("click", toggleScreenAction);
+    }
+    if (this.btnEmptyRoomCam) {
+      this.btnEmptyRoomCam.addEventListener("click", toggleCamAction);
+    }
+
+    this.groupsUI = new GroupsUI({
+      onToast: (msg, icon) => this.showToast(msg, icon),
+      onRequestScreenShare: toggleScreenAction,
+      onRequestWebcamToggle: toggleCamAction,
+      onModeChange: (mode) => {
+        if (mode === "private") {
+          this.groupEmptyStage.classList.add("hidden");
+          this.currentGroupRoomName = null;
+          // Fecha apenas streams provenientes de grupos ao voltar pro Privado
+          this.closeAllGroupStreams();
+        }
+      },
+      onDesiredRoomStreams: async (inRoom, _groupName, roomName, desired) => {
+        if (this.activeGroupSyncPending) return;
+        this.activeGroupSyncPending = true;
+        try {
+          if (!inRoom) {
+            this.currentGroupRoomName = null;
+            this.groupEmptyStage.classList.add("hidden");
+            await this.closeAllGroupStreams();
+            return;
+          }
+
+          this.currentGroupRoomName = roomName;
+          const desiredMap = new Map<string, DesiredGroupStream>();
+          for (const d of desired) {
+            desiredMap.set(d.streamKey, d);
+          }
+
+          // 1. Remove streams de grupo que encerraram ou mudaram de ticket
+          for (const [id, st] of Array.from(this.activeStreams.entries())) {
+            if (!st.isGroupStream) continue;
+            const wanted = desiredMap.get(id);
+            if (!wanted || wanted.ticket !== st.ticket) {
+              await this.stopWatchingPeer(id);
+            }
+          }
+
+          // 2. Inicia novas streams da sala automaticamente
+          for (const d of desired) {
+            if (!this.activeStreams.has(d.streamKey)) {
+              await this.startWatchingPeer(d.ticket, d.nick, d.streamKey, d.kind, true);
+            }
+          }
+
+          this.refreshStageVisibility();
+        } finally {
+          this.activeGroupSyncPending = false;
+        }
+      },
+    });
+  }
+
+  private async closeAllGroupStreams() {
+    for (const [id, st] of Array.from(this.activeStreams.entries())) {
+      if (st.isGroupStream) {
+        await this.stopWatchingPeer(id);
+      }
+    }
+    this.refreshStageVisibility();
+  }
+
+  private refreshStageVisibility() {
+    const hasAnyLocalOrRemote =
+      this.activeStreams.size > 0 ||
+      this.hostTileElement !== null ||
+      this.cameraTileElement !== null;
+
+    if (hasAnyLocalOrRemote) {
+      this.groupEmptyStage.classList.add("hidden");
+      this.sharePanel.classList.add("hidden");
+      this.watchPanel.classList.remove("hidden");
+      return;
+    }
+
+    if (this.groupsUI?.isInGroupRoom()) {
+      this.watchPanel.classList.add("hidden");
+      this.sharePanel.classList.add("hidden");
+      this.groupEmptyStage.classList.remove("hidden");
+      this.groupEmptyRoomTitle.textContent = `Sala # ${this.currentGroupRoomName || "Geral"}`;
+    } else {
+      this.groupEmptyStage.classList.add("hidden");
+      this.watchPanel.classList.add("hidden");
+      this.sharePanel.classList.remove("hidden");
+    }
+  }
+
   private bindEvents() {
     // Salvar Nickname
     const handleSaveNick = async () => {
@@ -361,7 +559,11 @@ class App {
     if (btnHomeLogo) {
       btnHomeLogo.addEventListener("click", (e) => {
         e.preventDefault();
-        if (this.activeStreams.size === 0 && !this.shareManager.getIsSharing()) {
+        if (
+          this.activeStreams.size === 0 &&
+          !this.shareManager.getIsSharing() &&
+          !this.cameraManager.getIsSharing()
+        ) {
           this.returnToSharePanel();
         }
       });
@@ -370,14 +572,20 @@ class App {
     // Círculo 1 do Dock: Compartilhar Tela / Alternar Fonte (Seamless Switch)
     this.btnCallShare.addEventListener("click", () => {
       if (this.shareManager.getIsSharing()) {
-        // Se já estiver transmitindo, abre o modal para alternar a tela/janela sem derrubar a sala
         this.shareManager.openShareModal(true);
-      } else if (!this.watchPanel.classList.contains("hidden")) {
-        // Se já estiver assistindo amigos no palco, abre o modal para escolher a tela
+      } else if (!this.watchPanel.classList.contains("hidden") || this.groupsUI?.isInGroupRoom()) {
         this.shareManager.openShareModal(false);
       } else {
-        // Se estiver no Estúdio inicial, inicia a transmissão da fonte selecionada imediatamente
         this.shareManager.startShare(false);
+      }
+    });
+
+    // Círculo Webcam do Dock: Ligar ou Desligar Webcam (Grupos ou Privado)
+    this.btnCallWebcam.addEventListener("click", () => {
+      if (this.cameraManager.getIsSharing()) {
+        this.cameraManager.stopCamera();
+      } else {
+        this.cameraManager.openModal(this.btnCallWebcam);
       }
     });
 
@@ -443,12 +651,19 @@ class App {
         }
       } else if (this.hostTileElement) {
         this.setStreamFocus("host");
+      } else if (this.cameraTileElement) {
+        this.setStreamFocus("host-cam");
       }
     });
 
-    // Círculo 3 do Dock: Desconectar / Sair da Sala
+    // Círculo Final do Dock: Desconectar / Sair da Sala
     this.btnStopAllWatch.addEventListener("click", () => {
-      if (this.activeStreams.size === 0 && !this.shareManager.getIsSharing()) {
+      if (
+        this.activeStreams.size === 0 &&
+        !this.shareManager.getIsSharing() &&
+        !this.cameraManager.getIsSharing() &&
+        !this.groupsUI.isInGroupRoom()
+      ) {
         this.shareManager.refreshSources();
         this.showToast("Fontes de captura atualizadas", "refresh");
         return;
@@ -500,28 +715,42 @@ class App {
 
   /**
    * Conecta a um amigo (ou código de sala lk-...) e adiciona uma tile à Grade da Sala.
-   * Mantém sua própria transmissão ativa na grade simultaneamente!
+   * Mantém sua própria transmissão (tela e/ou webcam) ativa na grade simultaneamente!
    */
-  private async startWatchingPeer(ip: string, nick: string) {
-    const streamId = ip.trim();
+  private async startWatchingPeer(
+    ip: string,
+    nick: string,
+    customStreamId?: string,
+    kind: "screen" | "camera" = "screen",
+    isGroupStream = false
+  ) {
+    const peerTarget = ip.trim();
+    const streamId = customStreamId || peerTarget;
 
     if (this.activeStreams.has(streamId)) {
-      this.setStreamFocus(streamId);
+      if (!isGroupStream) {
+        this.setStreamFocus(streamId);
+      }
       return;
     }
 
     const displayHost = nick === "Sala P2P" ? "Amigo (P2P)" : nick;
     const displayAddr = "P2P Internet";
 
+    this.groupEmptyStage.classList.add("hidden");
     this.sharePanel.classList.add("hidden");
     this.watchPanel.classList.remove("hidden");
 
     if (this.shareManager.getIsSharing()) {
       this.renderHostTile();
     }
+    if (this.cameraManager?.getIsSharing()) {
+      this.renderHostCameraTile(this.cameraManager.getIsMirrored());
+    }
 
+    const userPillIcon = kind === "camera" ? "videocam" : "desktop_windows";
     const tile = document.createElement("div");
-    tile.className = "stream-tile";
+    tile.className = `stream-tile ${kind === "camera" ? "camera-stream-tile" : ""}`;
     tile.dataset.streamId = streamId;
 
     tile.innerHTML = `
@@ -529,7 +758,9 @@ class App {
         <canvas class="stream-tile-canvas"></canvas>
         <div class="player-overlay">
           <div class="spinner"></div>
-          <div class="overlay-text">Conectando à transmissão...</div>
+          <div class="overlay-text">${
+            kind === "camera" ? "Conectando à webcam..." : "Conectando à transmissão..."
+          }</div>
         </div>
         <div class="tile-reconnecting-banner hidden">
           <span class="reconnecting-dot"></span>
@@ -539,8 +770,8 @@ class App {
 
       <div class="tile-top-overlay">
         <span class="badge-discord-live">
-          <span class="material-symbols-rounded ms-xs">sensors</span>
-          <span>LIVE</span>
+          <span class="material-symbols-rounded ms-xs">${kind === "camera" ? "videocam" : "sensors"}</span>
+          <span>${kind === "camera" ? "CAM" : "LIVE"}</span>
         </span>
         <span class="badge-tile-stat tile-stat-badge">Conectando...</span>
         <div class="viewers-badge-wrapper tile-viewers-wrapper">
@@ -564,12 +795,12 @@ class App {
       </div>
 
       <div class="tile-user-pill">
-        <span class="material-symbols-rounded">desktop_windows</span>
+        <span class="material-symbols-rounded">${userPillIcon}</span>
         <span class="tile-user-name" title="${this.escapeHtml(displayHost)}">${this.escapeHtml(displayHost)}</span>
       </div>
 
       <div class="tile-actions-overlay">
-        <div class="tile-volume-popover">
+        <div class="tile-volume-popover ${kind === "camera" ? "hidden" : ""}">
           <button class="btn-tile-icon btn-tile-mute" title="Mutar áudio deste amigo">
             <span class="material-symbols-rounded ms-sm">volume_up</span>
           </button>
@@ -581,9 +812,13 @@ class App {
         <button class="btn-tile-icon btn-tile-focus" title="Focar/Expandir este stream (ou dê duplo clique)">
           <span class="material-symbols-rounded ms-sm">open_in_full</span>
         </button>
-        <button class="btn-tile-icon btn-tile-close" title="Desconectar desta transmissão">
+        ${
+          isGroupStream
+            ? ""
+            : `<button class="btn-tile-icon btn-tile-close" title="Desconectar desta transmissão">
           <span class="material-symbols-rounded ms-sm">close</span>
-        </button>
+        </button>`
+        }
       </div>
     `;
 
@@ -596,10 +831,10 @@ class App {
     const btnMute = tile.querySelector(".btn-tile-mute") as HTMLButtonElement;
     const btnPip = tile.querySelector(".btn-tile-pip") as HTMLButtonElement;
     const btnFocus = tile.querySelector(".btn-tile-focus") as HTMLButtonElement;
-    const btnClose = tile.querySelector(".btn-tile-close") as HTMLButtonElement;
+    const btnClose = tile.querySelector(".btn-tile-close") as HTMLButtonElement | null;
 
-    let currentRes = "1080p";
-    let currentFps = "60 FPS";
+    let currentRes = kind === "camera" ? "720p" : "1080p";
+    let currentFps = kind === "camera" ? "30 FPS" : "60 FPS";
     let currentCodec = "H.264";
 
     const player = new StreamPlayer(
@@ -704,18 +939,23 @@ class App {
       try {
         await player.togglePiP();
       } catch (e) {
-        alert("Picture-in-Picture não suportado: " + e);
+        this.showToast("Picture-in-Picture não suportado: " + e, "error");
       }
     });
 
-    btnClose.addEventListener("click", () => {
-      this.stopWatchingPeer(streamId);
-    });
+    if (btnClose) {
+      btnClose.addEventListener("click", () => {
+        this.stopWatchingPeer(streamId);
+      });
+    }
 
     const activeStream: ActiveStream = {
       id: streamId,
+      ticket: peerTarget,
       nick: displayHost,
       addr: displayAddr,
+      kind,
+      isGroupStream,
       player,
       element: tile,
       statBadge,
@@ -729,9 +969,13 @@ class App {
     this.updateStatusPill();
 
     try {
-      await invoke("watch_peer", { streamId, peerIp: streamId, onEvent });
+      await invoke("watch_peer", { streamId, peerIp: peerTarget, onEvent });
     } catch (e) {
-      alert(`Falha ao conectar em ${displayHost}: ` + e);
+      if (!isGroupStream) {
+        this.showToast(`Falha ao conectar em ${displayHost}: ` + e, "error");
+      } else {
+        console.warn(`Falha ao assinar stream do grupo (${displayHost}):`, e);
+      }
       this.stopWatchingPeer(streamId);
     }
   }
@@ -756,10 +1000,7 @@ class App {
 
     this.updateGridLayout();
     this.updateStatusPill();
-
-    if (this.activeStreams.size === 0 && !this.shareManager.getIsSharing()) {
-      this.returnToSharePanel();
-    }
+    this.refreshStageVisibility();
   }
 
   private async stopAllWatching() {
@@ -789,15 +1030,20 @@ class App {
     if (this.shareManager.getIsSharing()) {
       await this.shareManager.stopShare();
     }
+    if (this.cameraManager?.getIsSharing()) {
+      await this.cameraManager.stopCamera();
+    }
+    if (this.groupsUI?.isInGroupRoom()) {
+      await this.groupsUI.exitCurrentRoom();
+    }
 
     this.updateGridLayout();
     this.updateStatusPill();
-    this.returnToSharePanel();
+    this.refreshStageVisibility();
   }
 
   private returnToSharePanel() {
-    this.watchPanel.classList.add("hidden");
-    this.sharePanel.classList.remove("hidden");
+    this.refreshStageVisibility();
   }
 
   /**
@@ -942,10 +1188,118 @@ class App {
       this.clearStreamFocus();
     }
     this.updateGridLayout();
+    this.refreshStageVisibility();
+  }
 
-    if (this.activeStreams.size === 0) {
-      this.returnToSharePanel();
+  /**
+   * Renderiza a tile da própria webcam na grade (independente da tela compartilhada).
+   */
+  private renderHostCameraTile(mirrored: boolean) {
+    if (this.cameraTileElement) {
+      const existingCanvas = this.cameraTileElement.querySelector(
+        "#host-camera-tile-canvas"
+      ) as HTMLCanvasElement | null;
+      if (existingCanvas) {
+        existingCanvas.classList.toggle("mirrored-preview", mirrored);
+      }
+      return;
     }
+
+    const tile = document.createElement("div");
+    tile.className = "stream-tile host-stream-tile camera-stream-tile";
+    tile.id = "host-camera-tile";
+
+    tile.innerHTML = `
+      <div class="stream-tile-canvas-wrap">
+        <canvas id="host-camera-tile-canvas" class="stream-tile-canvas ${
+          mirrored ? "mirrored-preview" : ""
+        }"></canvas>
+        <div id="host-camera-overlay" class="player-overlay">
+          <div class="spinner"></div>
+          <div class="overlay-text">Iniciando sua webcam...</div>
+        </div>
+      </div>
+
+      <div class="tile-top-overlay">
+        <span class="badge-discord-live">
+          <span class="material-symbols-rounded ms-xs">videocam</span>
+          <span>CAM</span>
+        </span>
+      </div>
+
+      <div class="tile-user-pill">
+        <span class="material-symbols-rounded">videocam</span>
+        <span class="tile-user-name">Sua Webcam (Você)</span>
+      </div>
+
+      <div class="tile-actions-overlay visible-always">
+        <button class="btn-tile-action-pill" id="btn-host-cam-mirror" title="Espelhar prévia local horizontalmente">
+          <span class="material-symbols-rounded ms-xs">flip</span>
+          <span>Espelhar</span>
+        </button>
+        <button class="btn-tile-action-pill danger" id="btn-host-cam-stop" title="Desligar webcam">
+          <span class="material-symbols-rounded ms-xs">videocam_off</span>
+          <span>Desligar</span>
+        </button>
+        <button class="btn-tile-icon btn-tile-focus" title="Focar webcam (ou dê duplo clique)">
+          <span class="material-symbols-rounded ms-sm">open_in_full</span>
+        </button>
+      </div>
+    `;
+
+    const canvas = tile.querySelector("#host-camera-tile-canvas") as HTMLCanvasElement;
+    const overlay = tile.querySelector("#host-camera-overlay") as HTMLElement;
+    const btnMirror = tile.querySelector("#btn-host-cam-mirror") as HTMLButtonElement;
+    const btnStop = tile.querySelector("#btn-host-cam-stop") as HTMLButtonElement;
+    const btnFocus = tile.querySelector(".btn-tile-focus") as HTMLButtonElement;
+
+    this.cameraTilePlayer = new StreamPlayer(canvas, overlay, undefined, false);
+    const camInfo = this.cameraManager.getShareInfo();
+    if (camInfo) {
+      if (camInfo.width && camInfo.height) {
+        this.cameraTilePlayer.setDimensions(camInfo.width, camInfo.height);
+      }
+      if (camInfo.codec) {
+        this.cameraTilePlayer.configureDecoder(camInfo.codec);
+      }
+    }
+
+    btnMirror.addEventListener("click", () => {
+      canvas.classList.toggle("mirrored-preview");
+    });
+
+    btnStop.addEventListener("click", () => {
+      this.cameraManager.stopCamera();
+      this.showToast("Webcam desligada", "videocam_off");
+    });
+
+    btnFocus.addEventListener("click", () => {
+      this.toggleFocusStream("host-cam");
+    });
+
+    canvas.addEventListener("dblclick", () => {
+      this.toggleFocusStream("host-cam");
+    });
+
+    this.cameraTileElement = tile;
+    this.streamsGrid.appendChild(tile);
+    this.updateGridLayout();
+  }
+
+  private removeHostCameraTile() {
+    if (this.cameraTilePlayer) {
+      this.cameraTilePlayer.destroy();
+      this.cameraTilePlayer = null;
+    }
+    if (this.cameraTileElement) {
+      this.cameraTileElement.remove();
+      this.cameraTileElement = null;
+    }
+    if (this.focusedStreamId === "host-cam") {
+      this.clearStreamFocus();
+    }
+    this.updateGridLayout();
+    this.refreshStageVisibility();
   }
 
   private toggleFocusStream(id: string) {
@@ -967,6 +1321,8 @@ class App {
 
     if (id === "host") {
       if (this.hostTileElement) this.hostTileElement.classList.add("focused");
+    } else if (id === "host-cam") {
+      if (this.cameraTileElement) this.cameraTileElement.classList.add("focused");
     } else {
       const stream = this.activeStreams.get(id);
       if (stream) stream.element.classList.add("focused");
@@ -984,17 +1340,19 @@ class App {
 
   private updateGridLayout() {
     const friendCount = this.activeStreams.size;
-    const hasHost = this.hostTileElement !== null;
-    const totalTiles = friendCount + (hasHost ? 1 : 0);
+    const localCount =
+      (this.hostTileElement !== null ? 1 : 0) + (this.cameraTileElement !== null ? 1 : 0);
+    const totalTiles = friendCount + localCount;
 
     if (totalTiles === 0) {
       this.streamsCountBadge.textContent = "Estúdio Pronto";
-    } else if (hasHost && friendCount > 0) {
+    } else if (localCount > 0 && friendCount > 0) {
       this.streamsCountBadge.textContent = `${friendCount} ${
-        friendCount === 1 ? "amigo" : "amigos"
-      } + sua live`;
-    } else if (hasHost) {
-      this.streamsCountBadge.textContent = "Sua live ativa";
+        friendCount === 1 ? "stream" : "streams"
+      } + sua transmissão`;
+    } else if (localCount > 0) {
+      this.streamsCountBadge.textContent =
+        localCount > 1 ? "Sua tela e webcam ativas" : "Sua transmissão ativa";
     } else {
       this.streamsCountBadge.textContent = `${friendCount} ${
         friendCount === 1 ? "stream ativo" : "streams ativos"

@@ -28,7 +28,7 @@
           </a>
 
           <div class="header-version-cluster">
-            <span class="version-tag" id="header-version-tag">v0.5.3</span>
+            <span class="version-tag" id="header-version-tag">v1.0.0</span>
             <button id="btn-check-updates" class="btn-check-update" title="Verificar atualizações">
               <span class="material-symbols-rounded ms-sm">sync</span>
               <span>Atualizações</span>
@@ -168,10 +168,150 @@
         </div>
       </header>
 
-      <!-- 3. Palco Central (Stage Principal — Estúdio de Configuração ou Grade 1 / 2 / 4 Streams) -->
-      <main class="app-stage">
-        <!-- Modo A: Estúdio de Preparação de Transmissão (Exibido quando ocioso) -->
-        <div id="share-panel" class="stage-card studio-stage active">
+      <!-- 2. Workspace em 3 Zonas: Rail Discord (Privado + Grupos) | Sidebar Salas | Palco Central -->
+      <div class="app-workspace">
+        <nav class="discord-rail" aria-label="Privado e Grupos">
+          <button
+            type="button"
+            id="btn-nav-private"
+            class="rail-item rail-private active"
+            title="Privado — Códigos Curtos (LK-...) e Amigos (Pedir para Entrar)"
+            aria-label="Privado"
+          >
+            <span class="rail-indicator"></span>
+            <span class="rail-avatar">
+              <span class="material-symbols-rounded">forum</span>
+            </span>
+          </button>
+
+          <div class="rail-divider" role="separator"></div>
+
+          <div id="groups-rail-list" class="groups-rail-list"></div>
+
+          <button
+            type="button"
+            id="btn-add-group"
+            class="rail-item rail-add-group"
+            title="Criar ou entrar em um grupo"
+            aria-label="Criar ou entrar em um grupo"
+          >
+            <span class="rail-avatar">
+              <span class="material-symbols-rounded">add</span>
+            </span>
+            <span id="rail-group-invites-badge" class="rail-invite-badge hidden">0</span>
+          </button>
+        </nav>
+
+        <aside id="group-sidebar" class="group-sidebar hidden" aria-label="Salas do Grupo">
+          <div class="group-sidebar-header">
+            <div class="group-header-info">
+              <h3 id="group-sidebar-name">Grupo</h3>
+              <span id="group-sidebar-meta" class="group-header-meta">Sem voz</span>
+            </div>
+            <div class="group-header-actions">
+              <button
+                type="button"
+                id="btn-group-invite"
+                class="btn-icon-ghost"
+                title="Convidar amigos ou gerar código do grupo"
+                aria-label="Convidar para o grupo"
+              >
+                <span class="material-symbols-rounded ms-sm">person_add</span>
+              </button>
+              <button
+                type="button"
+                id="btn-group-leave"
+                class="btn-icon-ghost danger-hover"
+                title="Sair deste grupo"
+                aria-label="Sair do grupo"
+              >
+                <span class="material-symbols-rounded ms-sm">logout</span>
+              </button>
+              <button
+                type="button"
+                id="btn-collapse-group-sidebar"
+                class="btn-icon-ghost"
+                title="Recolher/Expandir painel de salas"
+                aria-label="Recolher painel de salas"
+              >
+                <span class="material-symbols-rounded ms-sm">chevron_left</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="group-rooms-section">
+            <div class="group-rooms-section-header">
+              <span>SALAS DE STREAM</span>
+              <button
+                type="button"
+                id="btn-create-group-room"
+                class="btn-icon-ghost"
+                title="Criar nova sala de stream"
+                aria-label="Criar nova sala"
+              >
+                <span class="material-symbols-rounded ms-xs">add</span>
+              </button>
+            </div>
+            <div id="group-rooms-list" class="group-rooms-list"></div>
+          </div>
+
+          <div id="group-room-footer" class="group-room-footer hidden">
+            <div class="group-room-connected-top">
+              <div class="group-room-connected-status">
+                <span class="status-dot green"></span>
+                <div>
+                  <div class="connected-label">Na sala (sem voz)</div>
+                  <div id="group-connected-room-name" class="connected-room-name"># Geral</div>
+                </div>
+              </div>
+              <button
+                type="button"
+                id="btn-exit-group-room"
+                class="btn-icon-ghost danger-hover"
+                title="Sair da sala de streams"
+                aria-label="Desconectar da sala"
+              >
+                <span class="material-symbols-rounded ms-sm">call_end</span>
+              </button>
+            </div>
+            <div class="group-room-quick-actions">
+              <button type="button" id="btn-group-quick-screen" class="btn-quick-track">
+                <span class="material-symbols-rounded ms-xs">screen_share</span>
+                <span>Tela</span>
+              </button>
+              <button type="button" id="btn-group-quick-cam" class="btn-quick-track">
+                <span class="material-symbols-rounded ms-xs">videocam</span>
+                <span>Webcam</span>
+              </button>
+            </div>
+          </div>
+        </aside>
+
+        <!-- 3. Palco Central (Stage Principal — Estúdio de Configuração ou Grade 1 / 2 / 4 Streams) -->
+        <main class="app-stage">
+          <!-- Cartão de Estado Vazio quando conectado em uma Sala de Grupo sem transmissões ainda -->
+          <div id="group-empty-stage" class="group-empty-stage hidden">
+            <div class="group-empty-card">
+              <span class="material-symbols-rounded group-empty-icon">cast</span>
+              <h2 id="group-empty-room-title">Sala # Geral</h2>
+              <p id="group-empty-room-desc">
+                Você está na sala. Não há chamada de voz aqui — transmita sua tela ou ligue sua webcam abaixo para quem entrar assistir automaticamente.
+              </p>
+              <div class="group-empty-actions">
+                <button type="button" id="btn-empty-room-share" class="btn-primary btn-sm">
+                  <span class="material-symbols-rounded ms-sm">screen_share</span>
+                  <span>Transmitir Tela</span>
+                </button>
+                <button type="button" id="btn-empty-room-cam" class="btn-secondary btn-sm">
+                  <span class="material-symbols-rounded ms-sm">videocam</span>
+                  <span>Ligar Webcam</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Modo A: Estúdio de Preparação de Transmissão (Exibido quando ocioso no Privado ou Grupo sem sala) -->
+          <div id="share-panel" class="stage-card studio-stage active">
           <!-- Cartão legado de prévia oculto (mantido por compatibilidade de referências) -->
           <div id="host-preview-card" class="host-preview-card hidden">
             <span id="preview-fps-tag">60 FPS</span>
@@ -360,9 +500,10 @@
             </div>
           </div>
         </div>
-      </main>
+        </main>
+      </div>
 
-      <!-- 4. Dock Inferior com os 3 Círculos Principais (Design Fiel ao Rascunho) -->
+      <!-- 4. Dock Inferior com os Controles Principais -->
       <footer class="bottom-dock-bar">
         <div class="dock-side dock-left">
           <div class="call-room-chip" id="call-room-chip" title="Status da Sala">
@@ -380,20 +521,31 @@
           </button>
         </div>
 
-        <!-- Os 3 Botões Circulares Brancos Centrais do Rascunho -->
+        <!-- Os Botões Circulares Centrais (Tela, Webcam, Áudio, Sair) -->
         <div class="dock-center-circles">
           <button
             id="btn-call-share"
             class="btn-dock-circle"
             title="Compartilhar Tela / Alternar Fonte de Transmissão"
+            aria-label="Compartilhar Tela"
           >
             <span class="material-symbols-rounded">screen_share</span>
+          </button>
+
+          <button
+            id="btn-call-webcam"
+            class="btn-dock-circle"
+            title="Ligar / Desligar Webcam (sem áudio de microfone)"
+            aria-label="Ligar ou desligar webcam"
+          >
+            <span class="material-symbols-rounded" id="call-webcam-icon">videocam</span>
           </button>
 
           <button
             id="btn-call-mute-mic"
             class="btn-dock-circle"
             title="Mutar / Desmutar Áudio da Transmissão"
+            aria-label="Mutar ou desmutar áudio da transmissão"
           >
             <span class="material-symbols-rounded" id="call-mic-icon">volume_up</span>
           </button>
@@ -402,6 +554,7 @@
             id="btn-stop-all-watch"
             class="btn-dock-circle btn-dock-hangup"
             title="Encerrar e Sair da Sala"
+            aria-label="Encerrar e sair da sala"
           >
             <span class="material-symbols-rounded">call_end</span>
           </button>
@@ -587,7 +740,7 @@
             <div class="update-version-row">
               <div class="version-box">
                 <span class="version-label">Versão Atual</span>
-                <span class="version-val current" id="update-curr-version">v0.5.3</span>
+                <span class="version-val current" id="update-curr-version">v1.0.0</span>
               </div>
               <span class="material-symbols-rounded version-arrow">arrow_forward</span>
               <div class="version-box">
@@ -623,6 +776,175 @@
               <span class="material-symbols-rounded ms-sm">bolt</span>
               <span>Atualizar e Reiniciar</span>
             </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Modal de Webcam (Video P2P sem microfone) -->
+      <div id="webcam-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="webcam-modal-title">
+        <div class="modal-card modal-card-compact">
+          <div class="modal-header">
+            <div class="modal-title-group">
+              <span class="material-symbols-rounded modal-lead-icon">videocam</span>
+              <h3 id="webcam-modal-title">Compartilhar Webcam</h3>
+            </div>
+            <button id="btn-close-webcam-modal" class="btn-icon-ghost" type="button" title="Fechar" aria-label="Fechar janela de webcam">
+              <span class="material-symbols-rounded">close</span>
+            </button>
+          </div>
+          <div class="modal-body">
+            <div id="webcam-empty-notice" class="discord-badge hidden">
+              <span class="material-symbols-rounded ms-xs">videocam_off</span>
+              <span>Nenhuma webcam conectada. Conecte uma câmera e clique em Atualizar.</span>
+            </div>
+
+            <div class="control-group">
+              <div class="control-label-row">
+                <label for="webcam-device-select">Dispositivo de Câmera</label>
+                <button id="btn-refresh-cameras" class="btn-secondary btn-xs" type="button">
+                  <span class="material-symbols-rounded ms-xs">refresh</span>
+                  <span>Atualizar</span>
+                </button>
+              </div>
+              <select id="webcam-device-select"></select>
+            </div>
+
+            <div class="control-row-2">
+              <div class="control-group">
+                <label for="webcam-resolution-select">Resolução</label>
+                <select id="webcam-resolution-select">
+                  <option value="720p" selected>720p (Recomendado)</option>
+                  <option value="1080">1080p (Full HD)</option>
+                  <option value="480p">480p (Leve)</option>
+                </select>
+              </div>
+              <div class="control-group">
+                <label for="webcam-fps-select">FPS</label>
+                <select id="webcam-fps-select">
+                  <option value="30" selected>30 FPS</option>
+                  <option value="60">60 FPS</option>
+                </select>
+              </div>
+            </div>
+
+            <label class="checkbox-label">
+              <input type="checkbox" id="webcam-mirror-checkbox" checked />
+              <span class="material-symbols-rounded ms-sm">flip</span>
+              <span>Espelhar minha prévia local (quem assiste vê normal)</span>
+            </label>
+          </div>
+          <div class="modal-footer">
+            <button id="btn-cancel-webcam-modal" class="btn-secondary btn-sm" type="button">Cancelar</button>
+            <button id="btn-start-webcam" class="btn-primary btn-sm" type="button">
+              <span class="material-symbols-rounded ms-sm">videocam</span>
+              <span>Ligar Câmera</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Modal Criar ou Entrar em Grupo -->
+      <div id="group-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="group-modal-title">
+        <div class="modal-card modal-card-compact">
+          <div class="modal-header">
+            <div class="modal-title-group">
+              <span class="material-symbols-rounded modal-lead-icon">groups</span>
+              <h3 id="group-modal-title">Grupos P2P</h3>
+            </div>
+            <button id="btn-close-group-modal" class="btn-icon-ghost" type="button" title="Fechar" aria-label="Fechar janela de grupos">
+              <span class="material-symbols-rounded">close</span>
+            </button>
+          </div>
+          <div class="modal-body group-modal-stack">
+            <div id="group-pending-invites-area" class="pending-invites-area hidden"></div>
+
+            <div class="group-modal-box">
+              <label for="create-group-name-input">Criar novo grupo</label>
+              <div class="input-action-row">
+                <input
+                  type="text"
+                  id="create-group-name-input"
+                  placeholder="Ex.: Squad Sexta à Noite"
+                  maxlength="40"
+                />
+                <button id="btn-confirm-create-group" class="btn-primary btn-sm" type="button">Criar</button>
+              </div>
+            </div>
+
+            <div class="group-modal-divider">ou</div>
+
+            <div class="group-modal-box">
+              <label for="join-group-code-input">Entrar com código de convite</label>
+              <div class="input-action-row">
+                <input
+                  type="text"
+                  id="join-group-code-input"
+                  placeholder="LKG-XXXX-XXXX ou ticket lkg-..."
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+                <button id="btn-confirm-join-group" class="btn-secondary btn-sm" type="button">Entrar</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Modal Nova Sala no Grupo -->
+      <div id="group-room-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="group-room-modal-title">
+        <div class="modal-card modal-card-compact">
+          <div class="modal-header">
+            <div class="modal-title-group">
+              <span class="material-symbols-rounded modal-lead-icon">cast</span>
+              <h3 id="group-room-modal-title">Nova Sala de Stream</h3>
+            </div>
+            <button id="btn-close-room-modal" class="btn-icon-ghost" type="button" title="Fechar" aria-label="Fechar">
+              <span class="material-symbols-rounded">close</span>
+            </button>
+          </div>
+          <div class="modal-body">
+            <div class="group-modal-box">
+              <label for="new-group-room-input">Nome da sala (sem voz)</label>
+              <div class="input-action-row">
+                <input type="text" id="new-group-room-input" placeholder="Ex.: Jogos, Cine, Dev" maxlength="32" />
+                <button id="btn-confirm-create-room" class="btn-primary btn-sm" type="button">Criar Sala</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Modal Convidar para Grupo -->
+      <div id="group-invite-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="group-invite-modal-title">
+        <div class="modal-card modal-card-compact">
+          <div class="modal-header">
+            <div class="modal-title-group">
+              <span class="material-symbols-rounded modal-lead-icon">person_add</span>
+              <h3 id="group-invite-modal-title">Convidar para o Grupo</h3>
+            </div>
+            <button id="btn-close-invite-modal" class="btn-icon-ghost" type="button" title="Fechar" aria-label="Fechar">
+              <span class="material-symbols-rounded">close</span>
+            </button>
+          </div>
+          <div class="modal-body group-modal-stack">
+            <div class="group-modal-box">
+              <label for="group-invite-short-code">Código curto do grupo (P2P rápido)</label>
+              <div class="input-action-row">
+                <input type="text" id="group-invite-short-code" readonly />
+                <button id="btn-copy-group-short-code" class="btn-primary btn-sm" type="button">Copiar</button>
+              </div>
+            </div>
+            <div class="group-modal-box">
+              <label for="group-invite-direct-ticket">Ticket completo persistente (funciona com qualquer membro online)</label>
+              <div class="input-action-row">
+                <input type="text" id="group-invite-direct-ticket" readonly />
+                <button id="btn-copy-group-direct-ticket" class="btn-secondary btn-sm" type="button">Copiar</button>
+              </div>
+            </div>
+            <div class="group-modal-box">
+              <label>Convidar Amigos Online (1 clique)</label>
+              <div id="group-invite-friends-list" class="invite-friends-list"></div>
+            </div>
           </div>
         </div>
       </div>

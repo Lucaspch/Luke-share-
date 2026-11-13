@@ -147,7 +147,7 @@ pub struct KnockResult {
     pub message: String,
 }
 
-fn get_data_dir() -> Result<PathBuf> {
+pub(crate) fn get_data_dir() -> Result<PathBuf> {
     let base = std::env::var("APPDATA")
         .or_else(|_| std::env::var("LOCALAPPDATA"))
         .context("Variável APPDATA não encontrada")?;
@@ -313,6 +313,15 @@ impl FriendsManager {
 
     pub fn public_key_b58(&self) -> String {
         bs58::encode(self.verifying_key.as_bytes()).into_string()
+    }
+
+    pub fn signing_key_clone(&self) -> SigningKey {
+        self.signing_key.clone()
+    }
+
+    pub fn get_friend(&self, tag: &str) -> Option<Friend> {
+        let norm = normalize_tag(tag).ok()?;
+        self.friends.read().get(&norm).cloned()
     }
 
     pub fn save_friends(&self) {
@@ -591,11 +600,14 @@ impl FriendsManager {
         }
     }
 
-    /// Inicia os daemons P2P de Identidade Social (`LUKE_SOCIAL_ALPN`) e Descoberta de Tag (`LUKE_TAG_ALPN`).
+    /// Inicia os daemons P2P de Identidade Social (`LUKE_SOCIAL_ALPN`), Descoberta de Tag (`LUKE_TAG_ALPN`)
+    /// e Sincronização de Grupos (`LUKE_GROUP_ALPN`).
     pub fn start_daemons(
         self: &Arc<Self>,
         get_nick: Arc<dyn Fn() -> String + Send + Sync>,
         get_active_ticket: Arc<dyn Fn() -> Option<String> + Send + Sync>,
+        group_mgr: Option<Arc<crate::net::groups::GroupManager>>,
+        get_group_tracks: Option<crate::net::groups::GetActiveTrackTicketsFn>,
     ) {
         let mgr = self.clone();
         let nick_fn = get_nick.clone();
@@ -609,7 +621,10 @@ impl FriendsManager {
             let (social_res, tag_res) = tokio::join!(
                 Endpoint::builder(presets::N0)
                     .secret_key(secret)
-                    .alpns(vec![LUKE_SOCIAL_ALPN.to_vec()])
+                    .alpns(vec![
+                        LUKE_SOCIAL_ALPN.to_vec(),
+                        crate::net::groups::LUKE_GROUP_ALPN.to_vec(),
+                    ])
                     .bind(),
                 Endpoint::builder(presets::N0)
                     .secret_key(SecretKey::from_bytes(&tag_seed))
@@ -707,6 +722,10 @@ impl FriendsManager {
 
             tracing::info!("friends: Identidade {} online na rede P2P Iroh!", mgr.tag);
 
+            if let (Some(ref gm), Some(tracks_fn)) = (&group_mgr, get_group_tracks) {
+                gm.attach_and_start(social_ep.clone(), nick_fn.clone(), tracks_fn);
+            }
+
             // 3. Loop rápido de sincronização periódica (5s) + disparo inicial em 1.5s
             let mgr_hb = mgr.clone();
             let nick_hb = nick_fn.clone();
@@ -723,15 +742,23 @@ impl FriendsManager {
                 }
             });
 
-            // 4. Loop principal aceitando conexões autenticadas em LUKE_SOCIAL_ALPN
+            // 4. Loop principal aceitando conexões autenticadas em LUKE_SOCIAL_ALPN e LUKE_GROUP_ALPN
             while !mgr.stop.load(Ordering::SeqCst) {
                 let Some(incoming) = social_ep.accept().await else { break };
                 let mgr_conn = mgr.clone();
                 let nick_conn = nick_fn.clone();
                 let ticket_conn = ticket_fn.clone();
+                let gm_conn = group_mgr.clone();
 
                 tokio::spawn(async move {
                     let Ok(conn) = incoming.await else { return };
+                    if conn.alpn() == crate::net::groups::LUKE_GROUP_ALPN {
+                        if let Some(gm) = gm_conn {
+                            gm.handle_incoming_conn(conn).await;
+                        }
+                        return;
+                    }
+
                     let remote_pk_bytes = *conn.remote_id().as_bytes();
                     let Ok((mut send, mut recv)) = conn.accept_bi().await else { return };
                     let Ok(wire) = read_wire(&mut recv).await else { return };
@@ -1629,10 +1656,12 @@ mod tests {
         let alice = FriendsManager::ephemeral_for_test();
         let bob = FriendsManager::ephemeral_for_test();
 
-        alice.start_daemons(Arc::new(|| "AliceReal".to_string()), Arc::new(|| None));
+        alice.start_daemons(Arc::new(|| "AliceReal".to_string()), Arc::new(|| None), None, None);
         bob.start_daemons(
             Arc::new(|| "BobReal".to_string()),
             Arc::new(|| Some("lk-live-room".to_string())),
+            None,
+            None,
         );
 
         // Aguarda ambos publicarem no Pkarr/Relay real do Iroh

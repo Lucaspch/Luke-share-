@@ -15,6 +15,7 @@ use crate::audio::opus_enc::OpusEnc;
 use crate::audio::{AudioCaptureMode, AudioCapturer, AudioTarget};
 use crate::capture::sources::SourceInfo;
 use crate::capture::wgc::WgcCapture;
+use crate::capture::{CaptureSession, CaptureTarget, StreamKind};
 use crate::net::p2p::{ClusterTelemetryDecision, P2pHostManager, RoomTicket};
 use crate::net::protocol::*;
 use crate::net::short_code::ShortCodePublisher;
@@ -45,8 +46,9 @@ pub struct SenderPipeline {
     encoder_holder: Arc<RwLock<Arc<H264Encoder>>>,
     congestion_controller: Arc<Mutex<CongestionController>>,
     base_target_bitrate: Arc<std::sync::atomic::AtomicU32>,
-    audio_cap: AudioCapturer,
+    audio_cap: Option<AudioCapturer>,
     audio_tx: crossbeam_channel::Sender<Vec<f32>>,
+    pub stream_kind: StreamKind,
     pub p2p_endpoint: iroh::Endpoint,
     pub p2p_host: Arc<P2pHostManager>,
     pub room_ticket: Option<RoomTicket>,
@@ -75,6 +77,34 @@ impl SenderPipeline {
         preview_sink: Option<PreviewSink>,
         p2p_endpoint: iroh::Endpoint,
     ) -> Result<Self> {
+        Self::start_target(
+            CaptureTarget::Screen(source),
+            preset,
+            fps_target,
+            custom_bitrate_kbps,
+            codec_pref,
+            audio_muted,
+            audio_mode,
+            true,
+            preview_sink,
+            p2p_endpoint,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_target(
+        target: CaptureTarget,
+        preset: Preset,
+        fps_target: Option<u32>,
+        custom_bitrate_kbps: Option<u32>,
+        codec_pref: Option<String>,
+        audio_muted: bool,
+        audio_mode: AudioCaptureMode,
+        publish_short_code: bool,
+        preview_sink: Option<PreviewSink>,
+        p2p_endpoint: iroh::Endpoint,
+    ) -> Result<Self> {
+        let stream_kind = target.kind();
         let stop = Arc::new(AtomicBool::new(false));
         unsafe {
             let _ = windows::Win32::Media::timeBeginPeriod(1);
@@ -86,19 +116,29 @@ impl SenderPipeline {
 
         let (capture_fps, effective_fps) = match fps_target {
             None => {
-                let hz = source.refresh_rate().max(60);
+                let hz = match &target {
+                    CaptureTarget::Screen(s) => s.refresh_rate().max(60),
+                    CaptureTarget::Camera(c) => c.fps.clamp(24, 60),
+                };
                 (hz, hz)
             }
-            Some(0) => (0, source.refresh_rate().max(60)),
+            Some(0) => {
+                let hz = match &target {
+                    CaptureTarget::Screen(s) => s.refresh_rate().max(60),
+                    CaptureTarget::Camera(c) => c.fps.clamp(24, 60),
+                };
+                (0, hz)
+            }
             Some(n) => (n, n),
         };
 
-        // 1. Inicializa dispositivo D3D11 e Captura WGC
+        // 1. Inicializa dispositivo D3D11 e Captura (WGC Tela/Janela ou Webcam MF)
         let gpu = Gpu::new().context("falha ao criar contexto GPU D3D11")?;
         let (frame_tx, frame_rx) = crossbeam_channel::bounded(4);
-        let cap = WgcCapture::start(&gpu, &source, capture_fps, frame_tx).context("falha ao iniciar WGC")?;
+        let cap = CaptureSession::start(&gpu, &target, capture_fps, frame_tx)
+            .context("falha ao iniciar captura de vídeo")?;
 
-        let initial_size = cap.initial_size;
+        let initial_size = cap.initial_size();
         let (out_w, out_h) = target_size(initial_size.0, initial_size.1, preset);
         tracing::info!(
             "sender: resolução captura = {}x{}, saída = {}x{} ({:?}) @ {} FPS (capture_fps: {})",
@@ -157,29 +197,35 @@ impl SenderPipeline {
         let active_codec = encoder.codec;
         let encoder_holder = Arc::new(RwLock::new(encoder.clone()));
 
-        // 3. Inicializa Captura de Áudio WASAPI (por Aplicativo ou Sistema sem Discord)
+        // 3. Inicializa Captura de Áudio WASAPI apenas para Tela/Janela (Webcam envia só vídeo, sem microfone!)
         let (audio_tx, audio_rx) = crossbeam_channel::bounded::<Vec<f32>>(8);
         let audio_tx_clone = audio_tx.clone();
-        let audio_target = resolve_audio_target(&source, audio_mode);
-        let audio_cap = AudioCapturer::start(
-            audio_target,
-            &[
-                "discord.exe".into(),
-                "discordcanary.exe".into(),
-                "discordptb.exe".into(),
-            ],
-            Box::new(move |pcm| {
-                let _ = audio_tx.try_send(pcm.to_vec());
-            }),
-        )
-        .context("falha ao iniciar AudioCapturer WASAPI")?;
-        audio_cap.set_muted(audio_muted);
+        let audio_cap = match &target {
+            CaptureTarget::Screen(source) => {
+                let audio_target = resolve_audio_target(source, audio_mode);
+                let cap = AudioCapturer::start(
+                    audio_target,
+                    &[
+                        "discord.exe".into(),
+                        "discordcanary.exe".into(),
+                        "discordptb.exe".into(),
+                    ],
+                    Box::new(move |pcm| {
+                        let _ = audio_tx.try_send(pcm.to_vec());
+                    }),
+                )
+                .context("falha ao iniciar AudioCapturer WASAPI")?;
+                cap.set_muted(audio_muted);
+                Some(cap)
+            }
+            CaptureTarget::Camera(_) => None,
+        };
 
         let ring = Arc::new(Mutex::new(RetransmitRing::new(2048)));
         let min_bitrate = (bitrate / 6).clamp(1_200_000, 2_500_000).min(bitrate);
         let congestion_controller = Arc::new(Mutex::new(CongestionController::new(min_bitrate, bitrate, bitrate)));
 
-        // 4. Inicializa gerenciador P2P Nativo Iroh + Código Curto Blindado (LK-XXXX-XXXX)
+        // 4. Inicializa gerenciador P2P Nativo Iroh + Código Curto Blindado (opcional quando só em grupo)
         let p2p_host = Arc::new(P2pHostManager::new());
         let stream_token = p2p_host.stream_token;
         let host_addr = p2p_endpoint.addr();
@@ -191,16 +237,20 @@ impl SenderPipeline {
             }
         };
 
-        let (short_code, short_code_pub) = match ShortCodePublisher::start(host_addr) {
-            Ok(pub_handle) => {
-                let c = pub_handle.code.clone();
-                tracing::info!("sender: Código Curto Blindado ativo: {c}");
-                (Some(c), Some(pub_handle))
+        let (short_code, short_code_pub) = if publish_short_code {
+            match ShortCodePublisher::start(host_addr) {
+                Ok(pub_handle) => {
+                    let c = pub_handle.code.clone();
+                    tracing::info!("sender: Código Curto Blindado ativo: {c}");
+                    (Some(c), Some(pub_handle))
+                }
+                Err(e) => {
+                    tracing::warn!("sender: falha ao iniciar ShortCodePublisher: {e:#}");
+                    (None, None)
+                }
             }
-            Err(e) => {
-                tracing::warn!("sender: falha ao iniciar ShortCodePublisher: {e:#}");
-                (None, None)
-            }
+        } else {
+            (None, None)
         };
 
         let v_offer = VideoOffer {
@@ -209,10 +259,14 @@ impl SenderPipeline {
             fps: effective_fps,
             codec: active_codec.as_str().to_string(),
         };
-        let a_offer = Some(AudioOffer {
-            sample_rate: 48000,
-            channels: 2,
-        });
+        let a_offer = if audio_cap.is_some() {
+            Some(AudioOffer {
+                sample_rate: 48000,
+                channels: 2,
+            })
+        } else {
+            None
+        };
 
         let enc_kf = encoder_holder.clone();
         let kf_req = Arc::new(move || {
@@ -497,6 +551,7 @@ impl SenderPipeline {
             base_target_bitrate,
             audio_cap,
             audio_tx: audio_tx_clone,
+            stream_kind,
             p2p_endpoint,
             p2p_host,
             room_ticket,
@@ -646,7 +701,7 @@ impl SenderPipeline {
             }),
         ) {
             new_audio_cap.set_muted(audio_muted);
-            self.audio_cap = new_audio_cap;
+            self.audio_cap = Some(new_audio_cap);
         }
 
         let reconfig = Control::Reconfigure {
@@ -669,7 +724,9 @@ impl SenderPipeline {
     }
 
     pub fn set_audio_muted(&self, muted: bool) {
-        self.audio_cap.set_muted(muted);
+        if let Some(ref cap) = self.audio_cap {
+            cap.set_muted(muted);
+        }
         let p2p = self.p2p_host.clone();
         tauri::async_runtime::spawn(async move {
             p2p.broadcast_control(Control::AudioState { enabled: !muted }).await;

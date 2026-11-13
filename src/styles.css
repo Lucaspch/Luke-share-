@@ -2580,3 +2580,787 @@ body.mini-player-active .mini-player-overlay {
 .btn-knock-accept:hover {
   filter: brightness(1.08);
 }
+
+/* ==========================================================================
+   V1.0 — WORKSPACE DISCORD-STYLE (PRIVADO + GRUPOS + WEBCAM)
+   ========================================================================== */
+.app-workspace {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.app-stage {
+  min-width: 0;
+}
+
+body.mini-player-active .discord-rail,
+body.mini-player-active .group-sidebar,
+body.mini-player-active .group-empty-stage {
+  display: none !important;
+}
+
+/* --------------------------------------------------------------------------
+   1. RAIL VERTICAL (PRIVADO NO TOPO + SERVIDORES DE GRUPO)
+   -------------------------------------------------------------------------- */
+.discord-rail {
+  width: 68px;
+  flex-shrink: 0;
+  background: rgba(2, 10, 18, 0.92);
+  border-right: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 12px 0;
+  gap: 8px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+}
+
+.discord-rail::-webkit-scrollbar {
+  display: none;
+}
+
+.groups-rail-list {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.rail-divider {
+  width: 32px;
+  height: 2px;
+  border-radius: 2px;
+  background: rgba(56, 189, 248, 0.16);
+  margin: 2px 0;
+  flex-shrink: 0;
+}
+
+.rail-item {
+  position: relative;
+  width: 100%;
+  height: 46px;
+  background: transparent;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  color: var(--text-secondary);
+}
+
+.rail-indicator {
+  position: absolute;
+  left: 0;
+  width: 4px;
+  height: 0;
+  border-radius: 0 4px 4px 0;
+  background: var(--accent-cyan-bright);
+  transition: height 0.16s ease, opacity 0.16s ease;
+  opacity: 0;
+}
+
+.rail-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 22px;
+  background: rgba(11, 37, 60, 0.85);
+  border: 1px solid rgba(56, 189, 248, 0.18);
+  color: var(--text-primary);
+  font-size: 0.86rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-radius 0.18s ease, background-color 0.18s ease, border-color 0.18s ease, transform 0.12s ease;
+}
+
+@media (hover: hover) {
+  .rail-item:hover .rail-indicator {
+    height: 18px;
+    opacity: 0.85;
+  }
+
+  .rail-item:hover .rail-avatar {
+    border-radius: 14px;
+    background: rgba(14, 165, 233, 0.25);
+    border-color: rgba(56, 189, 248, 0.5);
+  }
+}
+
+.rail-item:active .rail-avatar {
+  transform: scale(0.96);
+}
+
+.rail-item.active .rail-indicator {
+  height: 32px;
+  opacity: 1;
+}
+
+.rail-item.active .rail-avatar {
+  border-radius: 14px;
+  background: linear-gradient(135deg, #0284c7 0%, #0ea5e9 100%);
+  border-color: rgba(186, 230, 253, 0.75);
+  color: #ffffff;
+  box-shadow: 0 4px 16px rgba(14, 165, 233, 0.35);
+}
+
+.rail-item.rail-add-group .rail-avatar {
+  background: rgba(16, 185, 129, 0.12);
+  border-color: rgba(16, 185, 129, 0.32);
+  color: #34d399;
+}
+
+@media (hover: hover) {
+  .rail-item.rail-add-group:hover .rail-avatar {
+    background: rgba(16, 185, 129, 0.28);
+    border-color: rgba(52, 211, 153, 0.65);
+    color: #ffffff;
+  }
+}
+
+.rail-live-dot {
+  position: absolute;
+  right: 10px;
+  bottom: 2px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--accent-success);
+  border: 2px solid #020a12;
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.65);
+}
+
+.rail-invite-badge {
+  position: absolute;
+  top: 0;
+  right: 9px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-danger);
+  color: #ffffff;
+  font-size: 0.68rem;
+  font-weight: 800;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid #020a12;
+}
+
+/* --------------------------------------------------------------------------
+   2. SIDEBAR DE SALAS DO GRUPO
+   -------------------------------------------------------------------------- */
+.group-sidebar {
+  width: 248px;
+  flex-shrink: 0;
+  background: rgba(5, 21, 35, 0.88);
+  border-right: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  transition: width 0.2s ease;
+}
+
+.group-sidebar.collapsed {
+  width: 44px;
+}
+
+.group-sidebar.collapsed .group-header-info,
+.group-sidebar.collapsed #btn-group-invite,
+.group-sidebar.collapsed #btn-group-leave,
+.group-sidebar.collapsed .group-rooms-section,
+.group-sidebar.collapsed .group-room-footer {
+  display: none;
+}
+
+.group-sidebar.collapsed .group-sidebar-header {
+  justify-content: center;
+  padding: 12px 6px;
+}
+
+.group-sidebar.collapsed #btn-collapse-group-sidebar .material-symbols-rounded {
+  transform: rotate(180deg);
+}
+
+.group-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 14px 12px 12px 14px;
+  border-bottom: 1px solid rgba(56, 189, 248, 0.12);
+}
+
+.group-header-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.group-header-info h3 {
+  font-size: 0.94rem;
+  font-weight: 800;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.group-header-meta {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.group-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.btn-icon-ghost.danger-hover:hover {
+  color: #fda4af;
+  background: rgba(244, 63, 94, 0.18);
+}
+
+.group-rooms-section {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 10px;
+  overflow-y: auto;
+}
+
+.group-rooms-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 6px 8px;
+  font-size: 0.69rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  color: var(--text-subtle);
+}
+
+.group-rooms-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.group-room-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.group-room-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  font-size: 0.84rem;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+@media (hover: hover) {
+  .group-room-btn:hover {
+    background: rgba(56, 189, 248, 0.09);
+    color: var(--text-primary);
+  }
+}
+
+.group-room-btn.joined {
+  background: rgba(14, 165, 233, 0.16);
+  border-color: rgba(56, 189, 248, 0.35);
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.group-room-btn .room-icon {
+  color: var(--text-subtle);
+}
+
+.group-room-btn.joined .room-icon {
+  color: var(--accent-cyan-bright);
+}
+
+.group-room-btn .room-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.room-count-pill {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: rgba(2, 8, 14, 0.55);
+  color: var(--text-muted);
+}
+
+.room-participants-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 2px 4px 6px 18px;
+}
+
+.room-participant-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: var(--radius-xs);
+  background: rgba(2, 10, 18, 0.38);
+  font-size: 0.76rem;
+  color: var(--text-secondary);
+  min-width: 0;
+}
+
+.room-participant-row.is-self {
+  border: 1px solid rgba(56, 189, 248, 0.18);
+}
+
+.participant-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-subtle);
+  flex-shrink: 0;
+}
+
+.participant-dot.live {
+  background: var(--accent-success);
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.7);
+}
+
+.participant-nick {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+
+.participant-chips {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.participant-track-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  font-size: 0.65rem;
+  font-weight: 700;
+}
+
+.participant-track-chip.screen {
+  background: rgba(14, 165, 233, 0.2);
+  border: 1px solid rgba(56, 189, 248, 0.38);
+  color: #7dd3fc;
+}
+
+.participant-track-chip.cam {
+  background: rgba(16, 185, 129, 0.18);
+  border: 1px solid rgba(52, 211, 153, 0.38);
+  color: #6ee7b7;
+}
+
+.participant-track-chip.idle {
+  background: rgba(100, 116, 139, 0.18);
+  color: var(--text-subtle);
+}
+
+/* Rodapé Conectado na Sala */
+.group-room-footer {
+  padding: 10px 12px;
+  background: rgba(2, 10, 18, 0.85);
+  border-top: 1px solid rgba(56, 189, 248, 0.14);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.group-room-connected-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.group-room-connected-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.connected-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: #34d399;
+}
+
+.connected-room-name {
+  font-size: 0.82rem;
+  font-weight: 800;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.group-room-quick-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 6px;
+}
+
+.btn-quick-track {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 7px 8px;
+  border-radius: var(--radius-xs);
+  border: 1px solid rgba(56, 189, 248, 0.22);
+  background: rgba(11, 37, 60, 0.72);
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
+}
+
+@media (hover: hover) {
+  .btn-quick-track:hover {
+    background: rgba(14, 165, 233, 0.18);
+    border-color: rgba(56, 189, 248, 0.45);
+    color: #ffffff;
+  }
+}
+
+.btn-quick-track:active {
+  transform: scale(0.96);
+}
+
+.btn-quick-track.active {
+  background: rgba(16, 185, 129, 0.22);
+  border-color: rgba(52, 211, 153, 0.55);
+  color: #a7f3d0;
+}
+
+/* --------------------------------------------------------------------------
+   3. PALCO VAZIO DA SALA DE GRUPO & WEBCAM MIRROR
+   -------------------------------------------------------------------------- */
+.group-empty-stage {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+}
+
+.group-empty-card {
+  width: 100%;
+  max-width: 520px;
+  padding: 32px 28px;
+  border-radius: var(--radius-stage);
+  background: linear-gradient(180deg, rgba(8, 30, 48, 0.9) 0%, rgba(5, 20, 34, 0.96) 100%);
+  border: 1.5px solid rgba(56, 189, 248, 0.25);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.55);
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.group-empty-icon {
+  font-size: 44px;
+  color: var(--accent-cyan-bright);
+  padding: 12px;
+  border-radius: 50%;
+  background: rgba(14, 165, 233, 0.14);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+}
+
+.group-empty-card h2 {
+  font-size: 1.2rem;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+
+.group-empty-card p {
+  font-size: 0.86rem;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  max-width: 420px;
+}
+
+.group-empty-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.stream-tile-canvas.mirrored-preview {
+  transform: scaleX(-1);
+}
+
+.stream-tile.camera-stream-tile {
+  border-color: rgba(52, 211, 153, 0.28);
+}
+
+/* --------------------------------------------------------------------------
+   4. MODAIS COMPACTOS V1.0 (WEBCAM, GRUPOS, SALAS, CONVITES)
+   -------------------------------------------------------------------------- */
+.modal-card.modal-card-compact {
+  max-width: 470px;
+  max-height: 86vh;
+}
+
+.modal-card.modal-card-compact .modal-body {
+  padding: 18px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+}
+
+.group-modal-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.group-modal-box {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.group-modal-box label,
+.control-label-row label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.control-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.control-row-2 {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.input-action-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.input-action-row input {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(56, 189, 248, 0.24);
+  background: rgba(2, 10, 18, 0.75);
+  color: var(--text-primary);
+  font-size: 0.84rem;
+}
+
+.input-action-row input:focus {
+  outline: none;
+  border-color: var(--accent-cyan-bright);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.16);
+}
+
+.group-modal-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-subtle);
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.group-modal-divider::before,
+.group-modal-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: rgba(56, 189, 248, 0.14);
+}
+
+.btn-xs {
+  padding: 5px 10px !important;
+  font-size: 0.74rem !important;
+  border-radius: var(--radius-xs) !important;
+}
+
+.pending-invites-area {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(14, 165, 233, 0.1);
+  border: 1px solid rgba(56, 189, 248, 0.28);
+}
+
+.pending-invites-title {
+  font-size: 0.74rem;
+  font-weight: 800;
+  color: var(--accent-cyan-bright);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.pending-invite-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-xs);
+  background: rgba(2, 10, 18, 0.6);
+}
+
+.pending-invite-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.pending-invite-info strong {
+  font-size: 0.84rem;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pending-invite-info span {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+}
+
+.pending-invite-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.invite-friends-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.invite-friend-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: var(--radius-xs);
+  background: rgba(2, 10, 18, 0.55);
+  border: 1px solid rgba(56, 189, 248, 0.12);
+}
+
+.invite-friend-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.invite-friend-nick {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.invite-friend-tag {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.invite-empty {
+  font-size: 0.78rem;
+  color: var(--text-subtle);
+  padding: 10px;
+  text-align: center;
+  background: rgba(2, 10, 18, 0.35);
+  border-radius: var(--radius-xs);
+}
+
+/* --------------------------------------------------------------------------
+   5. ACESSIBILIDADE E PREFERÊNCIA DE MOVIMENTO
+   -------------------------------------------------------------------------- */
+button:focus-visible,
+a:focus-visible,
+select:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--accent-cyan-bright);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
