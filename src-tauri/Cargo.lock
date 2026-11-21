@@ -2751,6 +2751,7 @@ dependencies = [
  "hex",
  "hmac",
  "iroh",
+ "jni 0.21.1",
  "miniz_oxide 0.9.1",
  "opus",
  "parking_lot",

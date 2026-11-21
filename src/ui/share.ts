@@ -606,6 +606,30 @@ export class ShareManager {
         onPreview,
       });
 
+      const questBridge = (window as unknown as {
+        LukeQuestBridge?: {
+          startScreenCapture?: (
+            eyeMode: number,
+            width: number,
+            height: number,
+            fps: number,
+            bitrateBps: number,
+            captureAudio: boolean
+          ) => void;
+          stopScreenCapture?: () => void;
+        };
+      }).LukeQuestBridge;
+      if (questBridge?.startScreenCapture) {
+        questBridge.startScreenCapture(
+          this.selectedSourceId,
+          info.width || 1920,
+          info.height || 1080,
+          info.fps || 60,
+          (bitrateKbps || 10000) * 1000,
+          audioEnabled
+        );
+      }
+
       if (this.previewPlayer) {
         if (info.width && info.height) {
           this.previewPlayer.setDimensions(info.width, info.height);
@@ -747,6 +771,10 @@ export class ShareManager {
   public async stopShare() {
     this.stopStatsPolling();
     try {
+      const questBridge = (window as unknown as {
+        LukeQuestBridge?: { stopScreenCapture?: () => void };
+      }).LukeQuestBridge;
+      questBridge?.stopScreenCapture?.();
       await invoke("stop_share");
     } catch (e) {
       console.warn("Erro ao parar share:", e);

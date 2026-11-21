@@ -1,4 +1,5 @@
 pub mod camera;
+pub mod external;
 pub mod sources;
 pub mod wgc;
 

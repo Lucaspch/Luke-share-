@@ -981,6 +981,7 @@ class App {
     // Controle de volume e mudo direto no motor WASAPI nativo em Rust
     volumeSlider.addEventListener("input", () => {
       const vol = parseFloat(volumeSlider.value);
+      player.setVolume(vol);
       invoke("set_stream_volume", { streamId, volume: vol }).catch(() => {});
       invoke("set_stream_muted", { streamId, muted: vol === 0 }).catch(() => {});
       btnMute.innerHTML = `<span class="material-symbols-rounded ms-sm">${

@@ -39,6 +39,79 @@ impl SourceInfo {
 #[cfg(windows)]
 pub use win::*;
 
+#[cfg(not(windows))]
+pub use non_win::*;
+
+#[cfg(not(windows))]
+mod non_win {
+    use super::SourceInfo;
+    use anyhow::Result;
+
+    pub fn list_sources() -> Vec<SourceInfo> {
+        vec![
+            SourceInfo::Monitor {
+                id: 1,
+                name: "Visão VR — 1 Tela (Olho Único Auto, Sem Tela Dupla)".into(),
+                width: 1920,
+                height: 1080,
+                primary: true,
+                refresh_rate: 72,
+            },
+            SourceInfo::Monitor {
+                id: 2,
+                name: "Visão VR — Forçar Olho Esquerdo (Cortar 2º Olho SBS)".into(),
+                width: 1920,
+                height: 1080,
+                primary: false,
+                refresh_rate: 72,
+            },
+            SourceInfo::Monitor {
+                id: 3,
+                name: "Visão VR — Forçar Olho Direito (Cortar 1º Olho SBS)".into(),
+                width: 1920,
+                height: 1080,
+                primary: false,
+                refresh_rate: 72,
+            },
+            SourceInfo::Monitor {
+                id: 4,
+                name: "Painel 2D Completo (Sem Corte de Olho VR)".into(),
+                width: 1920,
+                height: 1080,
+                primary: false,
+                refresh_rate: 72,
+            },
+        ]
+    }
+
+    pub fn capture_source_snapshot(source_id: isize) -> Result<String> {
+        let (title, subtitle) = match source_id {
+            2 => ("Olho Esquerdo (1 Tela)", "Recorte automático apenas do olho esquerdo SBS"),
+            3 => ("Olho Direito (1 Tela)", "Recorte automático apenas do olho direito SBS"),
+            4 => ("Painel 2D Completo", "Quadros 2D inteiros sem corte de lente VR"),
+            _ => ("Visão VR — 1 Tela Auto", "Remove automaticamente o 2º olho quando em modo estéreo"),
+        };
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#04121e"/>
+      <stop offset="100%" stop-color="#0b253c"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="360" rx="18" fill="url(#bg)" stroke="#38bdf8" stroke-opacity="0.4" stroke-width="3"/>
+  <rect x="190" y="96" width="260" height="120" rx="18" fill="#071b2c" stroke="#38bdf8" stroke-width="3"/>
+  <circle cx="265" cy="156" r="30" fill="#0ea5e9" fill-opacity="0.25" stroke="#38bdf8" stroke-width="3"/>
+  <circle cx="375" cy="156" r="30" fill="#0ea5e9" fill-opacity="0.12" stroke="#64748b" stroke-dasharray="6 4" stroke-width="2"/>
+  <text x="320" y="256" fill="#f8fafc" font-family="sans-serif" font-size="21" font-weight="700" text-anchor="middle">{title}</text>
+  <text x="320" y="286" fill="#7dd3fc" font-family="sans-serif" font-size="14" text-anchor="middle">{subtitle}</text>
+</svg>"##
+        );
+        let b64 = crate::pipeline::base64_encode(svg.as_bytes());
+        Ok(format!("data:image/svg+xml;base64,{b64}"))
+    }
+}
+
 #[cfg(windows)]
 mod win {
     use super::SourceInfo;

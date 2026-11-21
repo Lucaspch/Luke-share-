@@ -4,49 +4,7 @@
 //! (zero-copy) e cai para o MFT de software da Microsoft (com readback da GPU) se necessário.
 //! Saída em Annex B com SPS/PPS garantidos em todo keyframe.
 
-use std::mem::ManuallyDrop;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::thread::JoinHandle;
-use std::time::Duration;
-
-use anyhow::{anyhow, Context, Result};
-use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
-use windows::core::{Interface, GUID};
-use windows::Win32::Graphics::Direct3D11::*;
-use windows::Win32::Media::MediaFoundation::*;
-use windows::Win32::System::Com::{CoTaskMemFree, CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
-use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
-
 use serde::{Deserialize, Serialize};
-
-use super::d3d::Gpu;
-use super::h264::{
-    has_nal, hevc_nal_type, nals, ParamSets, NAL_HEVC_CRA, NAL_HEVC_IDR_N_LP, NAL_HEVC_IDR_W_RADL,
-    NAL_IDR,
-};
-
-fn var_bool(b: bool) -> VARIANT {
-    let mut v = VARIANT::default();
-    unsafe {
-        (*v.Anonymous.Anonymous).vt = VT_BOOL;
-        (*v.Anonymous.Anonymous).Anonymous.boolVal = if b {
-            windows::Win32::Foundation::VARIANT_TRUE
-        } else {
-            windows::Win32::Foundation::VARIANT_FALSE
-        };
-    }
-    v
-}
-
-fn var_u32(n: u32) -> VARIANT {
-    let mut v = VARIANT::default();
-    unsafe {
-        (*v.Anonymous.Anonymous).vt = VT_UI4;
-        (*v.Anonymous.Anonymous).Anonymous.ulVal = n;
-    }
-    v
-}
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum VideoCodec {
@@ -91,6 +49,56 @@ pub struct EncodedFrame {
     pub key: bool,
     pub pts_100ns: i64,
 }
+
+#[cfg(windows)]
+pub use win_enc::*;
+
+#[cfg(windows)]
+mod win_enc {
+    use super::{EncodedFrame, EncoderConfig, VideoCodec};
+    use super::super::d3d::Gpu;
+    use super::super::h264::{
+        has_nal, hevc_nal_type, nals, ParamSets, NAL_HEVC_CRA, NAL_HEVC_IDR_N_LP,
+        NAL_HEVC_IDR_W_RADL, NAL_IDR,
+    };
+    use anyhow::{anyhow, Context, Result};
+    use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
+    use std::mem::ManuallyDrop;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread::JoinHandle;
+    use std::time::Duration;
+    use windows::core::{Interface, GUID};
+    use windows::Win32::Graphics::Direct3D11::*;
+    use windows::Win32::Media::MediaFoundation::*;
+    use windows::Win32::System::Com::{
+        CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED,
+    };
+    use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
+
+fn var_bool(b: bool) -> VARIANT {
+    let mut v = VARIANT::default();
+    unsafe {
+        (*v.Anonymous.Anonymous).vt = VT_BOOL;
+        (*v.Anonymous.Anonymous).Anonymous.boolVal = if b {
+            windows::Win32::Foundation::VARIANT_TRUE
+        } else {
+            windows::Win32::Foundation::VARIANT_FALSE
+        };
+    }
+    v
+}
+
+fn var_u32(n: u32) -> VARIANT {
+    let mut v = VARIANT::default();
+    unsafe {
+        (*v.Anonymous.Anonymous).vt = VT_UI4;
+        (*v.Anonymous.Anonymous).Anonymous.ulVal = n;
+    }
+    v
+}
+
+
 
 struct Job {
     tex: ID3D11Texture2D,
@@ -615,5 +623,51 @@ mod tests {
         let _ = MFVideoFormat_H264;
         let _ = MFVideoFormat_HEVC;
         let _ = MFVideoFormat_AV1;
+    }
+}
+}
+
+#[cfg(not(windows))]
+pub use non_win_enc::*;
+
+#[cfg(not(windows))]
+mod non_win_enc {
+    use super::{EncodedFrame, EncoderConfig, VideoCodec};
+    use super::super::d3d::Gpu;
+    use crate::capture::external;
+    use anyhow::Result;
+
+    pub struct H264Encoder {
+        pub name: String,
+        pub hardware: bool,
+        pub codec: VideoCodec,
+    }
+
+    impl H264Encoder {
+        pub fn start(
+            _gpu: &Gpu,
+            cfg: EncoderConfig,
+            _allow_software: bool,
+            _on_frame: Box<dyn FnMut(EncodedFrame) + Send>,
+        ) -> Result<Self> {
+            external::set_target_bitrate(cfg.bitrate);
+            Ok(Self {
+                name: "Android MediaCodec H.264".into(),
+                hardware: true,
+                codec: VideoCodec::H264,
+            })
+        }
+
+        pub fn submit(&self, _tex: (), _pts_100ns: i64) -> bool {
+            false
+        }
+
+        pub fn request_keyframe(&self) {
+            external::request_keyframe();
+        }
+
+        pub fn set_bitrate(&self, bitrate: u32) {
+            external::set_target_bitrate(bitrate);
+        }
     }
 }

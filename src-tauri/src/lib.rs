@@ -46,8 +46,13 @@ pub fn run() {
         active_receivers: Mutex::new(HashMap::new()),
     };
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_updater::Builder::new().build())
+    let mut builder = tauri::Builder::default();
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+
+    builder
         .manage(app_state)
         .setup(move |_app| {
             let get_nick = Arc::new(move || lp_boot.nick());

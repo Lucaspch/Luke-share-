@@ -1,12 +1,14 @@
 //! Escala + conversão BGRA → NV12 inteiramente na GPU (D3D11 Video Processor).
 
+#[cfg(windows)]
+mod win_impl {
 use anyhow::{Context, Result};
 use windows::core::Interface;
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 
-use super::d3d::Gpu;
+use super::super::d3d::Gpu;
 
 const POOL: usize = 8;
 
@@ -330,6 +332,33 @@ mod tests {
 
         println!("Dynamic adaptation corner sum: {}", corner_sum);
         assert!(corner_sum > 100_000, "Scaler CROPPED instead of adapting! corner_sum was {}", corner_sum);
+        Ok(())
+    }
+}
+
+}
+
+#[cfg(windows)]
+pub use win_impl::*;
+
+#[cfg(not(windows))]
+pub struct Scaler {
+    pub in_size: (u32, u32),
+    pub out_size: (u32, u32),
+}
+
+#[cfg(not(windows))]
+impl Scaler {
+    pub fn new(
+        _gpu: &super::d3d::Gpu,
+        in_size: (u32, u32),
+        out_size: (u32, u32),
+        _fps: u32,
+    ) -> anyhow::Result<Self> {
+        Ok(Self { in_size, out_size })
+    }
+
+    pub fn process(&mut self, _src: &()) -> anyhow::Result<()> {
         Ok(())
     }
 }

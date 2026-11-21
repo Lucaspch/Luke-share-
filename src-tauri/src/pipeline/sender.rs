@@ -106,6 +106,7 @@ impl SenderPipeline {
     ) -> Result<Self> {
         let stream_kind = target.kind();
         let stop = Arc::new(AtomicBool::new(false));
+        #[cfg(windows)]
         unsafe {
             let _ = windows::Win32::Media::timeBeginPeriod(1);
         };
@@ -196,6 +197,20 @@ impl SenderPipeline {
         );
         let active_codec = encoder.codec;
         let encoder_holder = Arc::new(RwLock::new(encoder.clone()));
+
+        #[cfg(not(windows))]
+        {
+            let src_id = match &target {
+                CaptureTarget::Screen(s) => s.id(),
+                CaptureTarget::Camera(_) => 4,
+            };
+            crate::capture::external::register_video_sender(
+                stream_kind,
+                enc_tx_clone.clone(),
+                bitrate,
+                src_id,
+            );
+        }
 
         // 3. Inicializa Captura de Áudio WASAPI apenas para Tela/Janela (Webcam envia só vídeo, sem microfone!)
         let (audio_tx, audio_rx) = crossbeam_channel::bounded::<Vec<f32>>(8);
@@ -659,6 +674,13 @@ impl SenderPipeline {
         self.active_fps = effective_fps;
         self.active_codec = new_encoder.codec;
 
+        #[cfg(not(windows))]
+        {
+            crate::capture::external::set_active_source_id(source.id());
+            crate::capture::external::set_target_bitrate(initial_br);
+            crate::capture::external::request_keyframe();
+        }
+
         let mut scaler = Scaler::new(&self.gpu, initial_size, (out_w, out_h), effective_fps)
             .context("falha ao criar novo Scaler durante switch")?;
 
@@ -689,6 +711,7 @@ impl SenderPipeline {
         let audio_tx = self.audio_tx.clone();
         let audio_target = resolve_audio_target(&source, audio_mode);
         self.active_audio_mode = audio_mode;
+        self.audio_cap = None;
         if let Ok(new_audio_cap) = AudioCapturer::start(
             audio_target,
             &[
@@ -765,9 +788,15 @@ impl SenderPipeline {
     pub fn stop(&mut self) {
         self.wgc_stop.store(true, Ordering::SeqCst);
         self.stop.store(true, Ordering::SeqCst);
+        #[cfg(not(windows))]
+        {
+            crate::capture::external::unregister_video_sender(self.stream_kind);
+            crate::capture::external::unregister_audio_sender();
+        }
         if let Some(sc) = self.short_code_pub.take() {
             sc.stop();
         }
+        #[cfg(windows)]
         unsafe {
             let _ = windows::Win32::Media::timeEndPeriod(1);
         };

@@ -1,5 +1,7 @@
 //! Dispositivo Direct3D 11 compartilhado entre captura (WGC), escala (VideoProcessor) e encoder (MF).
 
+#[cfg(windows)]
+mod win_impl {
 use anyhow::{Context, Result};
 use windows::core::Interface;
 use windows::Win32::Foundation::HMODULE;
@@ -56,5 +58,25 @@ impl Gpu {
             Ok(String::from_utf16_lossy(&desc.Description[..len]))
         })()
         .unwrap_or_else(|_| "GPU".into())
+    }
+}
+
+}
+
+#[cfg(windows)]
+pub use win_impl::*;
+
+#[cfg(not(windows))]
+#[derive(Clone)]
+pub struct Gpu;
+
+#[cfg(not(windows))]
+impl Gpu {
+    pub fn new() -> anyhow::Result<Self> {
+        Ok(Self)
+    }
+
+    pub fn adapter_name(&self) -> String {
+        "Adreno / Android Hardware Video".into()
     }
 }

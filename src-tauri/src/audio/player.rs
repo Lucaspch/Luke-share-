@@ -4,28 +4,34 @@
 //! eliminando engasgos ou suspensão de áudio quando a janela está minimizada ou em segundo plano,
 //! além de remover 100% da serialização Base64/IPC de áudio.
 
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
-
-use anyhow::{Context, Result};
-use parking_lot::Mutex;
-use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
-use windows::Win32::Media::Audio::*;
-use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
-use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
-
-use super::loopback::{ComGuard, CHANNELS, SAMPLE_RATE};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 static ACTIVE_PLAYERS: AtomicUsize = AtomicUsize::new(0);
 
-/// Quantidade de streams reproduzindo áudio via WASAPI neste processo no momento.
+/// Quantidade de streams reproduzindo áudio neste processo no momento.
 /// Usado pelo `AudioCapturer` para garantir que o áudio assistido nunca gere eco na própria live.
 pub fn active_audio_players_count() -> usize {
     ACTIVE_PLAYERS.load(Ordering::Relaxed)
 }
+
+#[cfg(windows)]
+pub use win_player::*;
+
+#[cfg(windows)]
+mod win_player {
+    use super::ACTIVE_PLAYERS;
+    use super::super::loopback::{ComGuard, CHANNELS, SAMPLE_RATE};
+    use anyhow::{Context, Result};
+    use parking_lot::Mutex;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::Arc;
+    use std::thread::JoinHandle;
+    use std::time::{Duration, Instant};
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+    use windows::Win32::Media::Audio::*;
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+    use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
 const MIN_PREBUFFER_FRAMES: usize = (SAMPLE_RATE as usize * 45) / 1000; // 45 ms (2160 frames estéreo)
 const MAX_PREBUFFER_FRAMES: usize = (SAMPLE_RATE as usize * 85) / 1000; // 85 ms (4080 frames estéreo)
@@ -310,6 +316,8 @@ impl NativeAudioPlayer {
     pub fn set_muted(&self, muted: bool) {
         self.muted.store(muted, Ordering::Relaxed);
     }
+
+    pub fn set_ipc_sink(&self, _sink: Arc<dyn Fn(Vec<f32>) + Send + Sync>) {}
 }
 
 impl Drop for NativeAudioPlayer {
@@ -319,5 +327,79 @@ impl Drop for NativeAudioPlayer {
             let _ = t.join();
         }
         ACTIVE_PLAYERS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+}
+
+#[cfg(not(windows))]
+pub use non_win_player::*;
+
+#[cfg(not(windows))]
+mod non_win_player {
+    use super::ACTIVE_PLAYERS;
+    use parking_lot::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    pub type AudioIpcSink = Arc<dyn Fn(Vec<f32>) + Send + Sync>;
+
+    pub struct NativeAudioPlayer {
+        volume_bits: Arc<AtomicU32>,
+        muted: Arc<AtomicBool>,
+        ipc_sink: Mutex<Option<AudioIpcSink>>,
+    }
+
+    impl NativeAudioPlayer {
+        pub fn start() -> Self {
+            ACTIVE_PLAYERS.fetch_add(1, Ordering::SeqCst);
+            Self {
+                volume_bits: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+                muted: Arc::new(AtomicBool::new(false)),
+                ipc_sink: Mutex::new(None),
+            }
+        }
+
+        pub fn set_ipc_sink(&self, sink: AudioIpcSink) {
+            *self.ipc_sink.lock() = Some(sink);
+        }
+
+        pub fn push_samples(&self, pcm_interleaved: &[f32]) {
+            if pcm_interleaved.is_empty() || self.muted.load(Ordering::Relaxed) {
+                return;
+            }
+            let sink = self.ipc_sink.lock().clone();
+            let Some(sink) = sink else {
+                return;
+            };
+            let vol = f32::from_bits(self.volume_bits.load(Ordering::Relaxed));
+            if vol <= 0.001 {
+                return;
+            }
+            let samples = if (vol - 1.0).abs() < 0.005 {
+                pcm_interleaved.to_vec()
+            } else {
+                pcm_interleaved
+                    .iter()
+                    .map(|&s| (s * vol).clamp(-1.0, 1.0))
+                    .collect()
+            };
+            sink(samples);
+        }
+
+        pub fn set_volume(&self, volume: f32) {
+            self.volume_bits
+                .store(volume.clamp(0.0, 1.5).to_bits(), Ordering::Relaxed);
+        }
+
+        pub fn set_muted(&self, muted: bool) {
+            self.muted.store(muted, Ordering::Relaxed);
+        }
+    }
+
+    impl Drop for NativeAudioPlayer {
+        fn drop(&mut self) {
+            *self.ipc_sink.lock() = None;
+            ACTIVE_PLAYERS.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 }

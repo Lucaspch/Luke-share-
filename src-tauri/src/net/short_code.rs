@@ -41,12 +41,7 @@ pub fn configured_worker_url() -> Option<String> {
             return Some(t);
         }
     }
-    let base = std::env::var("APPDATA")
-        .or_else(|_| std::env::var("LOCALAPPDATA"))
-        .ok()?;
-    let mut path = std::path::PathBuf::from(base);
-    path.push("Luke-Share");
-    path.push("worker_url.txt");
+    let path = super::friends::get_data_dir().ok()?.join("worker_url.txt");
     let raw = std::fs::read_to_string(path).ok()?;
     let trimmed = raw.trim().trim_end_matches('/').to_string();
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
@@ -79,8 +74,8 @@ pub fn normalize_short_code(input: &str) -> Option<String> {
     if trimmed.len() > 20 {
         return None;
     }
-    // Tickets longos base64 começam com "lk-ey"
-    if trimmed.starts_with("lk-ey") {
+    // Tickets longos Base64 começam com "lk-ey" sem segundo hífen na posição 7 (ex.: lk-eyJ...)
+    if trimmed.starts_with("lk-ey") && !trimmed.as_bytes().get(7).is_some_and(|&b| b == b'-') {
         return None;
     }
 

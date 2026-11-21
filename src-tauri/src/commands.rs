@@ -119,12 +119,7 @@ pub fn get_my_info(state: State<'_, AppState>) -> Result<MyInfo, String> {
 }
 
 fn get_saved_nick_path() -> Option<std::path::PathBuf> {
-    let base = std::env::var("APPDATA")
-        .or_else(|_| std::env::var("LOCALAPPDATA"))
-        .ok()?;
-    let mut dir = std::path::PathBuf::from(base);
-    dir.push("Luke-Share");
-    let _ = std::fs::create_dir_all(&dir);
+    let mut dir = crate::net::friends::get_data_dir().ok()?;
     dir.push("nick.txt");
     Some(dir)
 }

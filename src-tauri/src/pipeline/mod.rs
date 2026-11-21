@@ -12,6 +12,9 @@ pub const BIN_VIDEO_MAGIC: u8 = 0x56; // 'V'
 pub const BIN_VIDEO_FLAG_KEY: u8 = 0x01;
 pub const BIN_VIDEO_HEADER_LEN: usize = 8;
 
+pub const BIN_AUDIO_MAGIC: u8 = 0x41; // 'A'
+pub const BIN_AUDIO_HEADER_LEN: usize = 4;
+
 /// Empacota um quadro de vídeo codificado (Annex-B H.264/HEVC/AV1) com cabeçalho binário de 8 bytes
 /// para entrega direta via `ArrayBuffer` ao WebView2 sem codificação Base64/JSON:
 /// `[0x56, flags, 0, 0, pts_u32_le(4B), ...bitstream]`
@@ -26,6 +29,20 @@ pub fn pack_binary_video_ipc(key: bool, pts: u32, bitstream: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Empacota amostras de áudio PCM f32 estéreo 48 kHz para entrega binária ao WebAudio no Android/Quest:
+/// `[0x41, 0, 0, 0, ...f32_le_bytes]`
+pub fn pack_binary_audio_ipc(samples: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(BIN_AUDIO_HEADER_LEN + samples.len() * 4);
+    out.push(BIN_AUDIO_MAGIC);
+    out.push(0);
+    out.push(0);
+    out.push(0);
+    for &s in samples {
+        out.extend_from_slice(&s.to_le_bytes());
+    }
+    out
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "t")]
 pub enum StreamEvent {
@@ -35,6 +52,11 @@ pub enum StreamEvent {
         key: bool,
         pts: u32,
         data: Vec<u8>,
+    },
+    /// Áudio binário PCM f32 48 kHz estéreo despachado como InvokeResponseBody::Raw em plataformas sem WASAPI.
+    #[serde(skip)]
+    AudioBin {
+        samples: Vec<f32>,
     },
     #[serde(rename = "config")]
     Config {
@@ -90,6 +112,10 @@ pub fn dispatch_ipc_event(chan: &Channel<InvokeResponseBody>, ev: StreamEvent) {
     match ev {
         StreamEvent::VideoBin { key, pts, data } => {
             let raw = pack_binary_video_ipc(key, pts, &data);
+            let _ = chan.send(InvokeResponseBody::Raw(raw));
+        }
+        StreamEvent::AudioBin { samples } => {
+            let raw = pack_binary_audio_ipc(&samples);
             let _ = chan.send(InvokeResponseBody::Raw(raw));
         }
         other => {

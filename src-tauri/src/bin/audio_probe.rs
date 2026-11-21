@@ -1,3 +1,6 @@
+#![allow(unused)]
+#[cfg(windows)]
+mod win_bin {
 //! Sonda de áudio: captura via `AudioCapturer` (mesma lógica do app) e mede tons por Goertzel.
 //!
 //! Uso:
@@ -16,7 +19,7 @@ fn arg(args: &[String], key: &str) -> Option<String> {
     args.iter().position(|a| a == key).and_then(|i| args.get(i + 1).cloned())
 }
 
-fn main() -> anyhow::Result<()> {
+pub fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let mode = arg(&args, "--mode").unwrap_or_else(|| "system".into());
     let secs: f32 = arg(&args, "--seconds").and_then(|s| s.parse().ok()).unwrap_or(5.0);
@@ -54,3 +57,13 @@ fn main() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+}
+
+#[cfg(windows)]
+fn main() -> anyhow::Result<()> {
+    win_bin::main().map_err(|e| anyhow::anyhow!("{e:?}"))
+}
+
+#[cfg(not(windows))]
+fn main() {}

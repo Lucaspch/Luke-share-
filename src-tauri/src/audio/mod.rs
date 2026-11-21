@@ -11,7 +11,6 @@ pub mod process_tree;
 
 #[cfg(windows)]
 pub mod loopback;
-#[cfg(windows)]
 pub mod player;
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -199,6 +198,87 @@ mod capturer {
                 let _ = t.join();
             }
             self.shared.sources.lock().clear();
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub use non_win_capturer::*;
+
+#[cfg(not(windows))]
+mod non_win_capturer {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread::JoinHandle;
+    use std::time::Duration;
+
+    use anyhow::Result;
+
+    use crate::capture::external;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum AudioTarget {
+        System,
+        Window { pid: u32 },
+    }
+
+    pub struct AudioCapturer {
+        muted: Arc<AtomicBool>,
+        stop: Arc<AtomicBool>,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl AudioCapturer {
+        pub fn start(
+            _target: AudioTarget,
+            _excluded: &[String],
+            mut on_frame: Box<dyn FnMut(&[f32]) + Send>,
+        ) -> Result<Self> {
+            let (tx, rx) = crossbeam_channel::bounded::<Vec<f32>>(16);
+            external::register_audio_sender(tx, false);
+            let muted = Arc::new(AtomicBool::new(false));
+            let stop = Arc::new(AtomicBool::new(false));
+            let st = stop.clone();
+            let m = muted.clone();
+            let thread = std::thread::Builder::new()
+                .name("ext-audio-pump".into())
+                .spawn(move || {
+                    while !st.load(Ordering::SeqCst) {
+                        if let Ok(pcm) = rx.recv_timeout(Duration::from_millis(50)) {
+                            if !m.load(Ordering::Relaxed) {
+                                on_frame(&pcm);
+                            }
+                        }
+                    }
+                })?;
+            Ok(Self {
+                muted,
+                stop,
+                thread: Some(thread),
+            })
+        }
+
+        pub fn set_muted(&self, muted: bool) {
+            self.muted.store(muted, Ordering::Relaxed);
+            external::set_audio_muted(muted);
+        }
+
+        pub fn is_blocked(&self) -> bool {
+            false
+        }
+
+        pub fn describe(&self) -> String {
+            "Android AudioPlaybackCapture".into()
+        }
+    }
+
+    impl Drop for AudioCapturer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            external::unregister_audio_sender();
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
         }
     }
 }

@@ -32,6 +32,8 @@ export type StreamChannelMsg = ArrayBuffer | Uint8Array | StreamEvent;
 const BIN_VIDEO_MAGIC = 0x56; // 'V'
 const BIN_VIDEO_FLAG_KEY = 0x01;
 const BIN_VIDEO_HEADER_LEN = 8;
+const BIN_AUDIO_MAGIC = 0x41; // 'A'
+const BIN_AUDIO_HEADER_LEN = 4;
 
 export function extractBinaryBuffer(msg: StreamChannelMsg): ArrayBuffer | null {
   if (msg instanceof ArrayBuffer) {
@@ -232,6 +234,10 @@ export class StreamPlayer {
   private currentCodec = "h264";
   private pipVideo: HTMLVideoElement | null = null;
   private isPiP = false;
+  private audioCtx: AudioContext | null = null;
+  private audioGain: GainNode | null = null;
+  private audioVolume = 1.0;
+  private nextAudioTime = 0;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -432,10 +438,64 @@ export class StreamPlayer {
    * Recebe o pacote binário puro do IPC do Tauri v2 (`ArrayBuffer`), sem Base64 e sem cópias extras:
    * `[0x56, flags, 0, 0, pts_u32_le(4B), ...bitstream]`
    */
+  public setVolume(vol: number) {
+    this.audioVolume = Math.max(0, Math.min(1.5, vol));
+    if (this.audioGain && this.audioCtx) {
+      this.audioGain.gain.setValueAtTime(this.audioVolume, this.audioCtx.currentTime);
+    }
+  }
+
+  private handleBinaryAudioPacket(buf: ArrayBuffer) {
+    const floatCount = Math.floor((buf.byteLength - BIN_AUDIO_HEADER_LEN) / 4);
+    const frameCount = Math.floor(floatCount / 2);
+    if (frameCount <= 0) return;
+
+    if (!this.audioCtx) {
+      const Ctx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (!Ctx) return;
+      this.audioCtx = new Ctx({ sampleRate: 48000, latencyHint: "interactive" });
+      this.audioGain = this.audioCtx.createGain();
+      this.audioGain.gain.value = this.audioVolume;
+      this.audioGain.connect(this.audioCtx.destination);
+      this.nextAudioTime = 0;
+    }
+
+    if (this.audioCtx.state === "suspended") {
+      this.audioCtx.resume().catch(() => {});
+    }
+
+    const pcm = new Float32Array(buf, BIN_AUDIO_HEADER_LEN, frameCount * 2);
+    const abuf = this.audioCtx.createBuffer(2, frameCount, 48000);
+    const left = abuf.getChannelData(0);
+    const right = abuf.getChannelData(1);
+    for (let i = 0; i < frameCount; i++) {
+      left[i] = pcm[i * 2];
+      right[i] = pcm[i * 2 + 1];
+    }
+
+    const src = this.audioCtx.createBufferSource();
+    src.buffer = abuf;
+    src.connect(this.audioGain!);
+
+    const now = this.audioCtx.currentTime;
+    if (this.nextAudioTime < now || this.nextAudioTime - now > 0.14) {
+      this.nextAudioTime = now + 0.025;
+    }
+    src.start(this.nextAudioTime);
+    this.nextAudioTime += frameCount / 48000;
+  }
+
   public handleBinaryVideoPacket(buf: ArrayBuffer) {
-    if (buf.byteLength <= BIN_VIDEO_HEADER_LEN) return;
+    if (buf.byteLength <= BIN_AUDIO_HEADER_LEN) return;
     const view = new DataView(buf);
-    if (view.getUint8(0) !== BIN_VIDEO_MAGIC) return;
+    const magic = view.getUint8(0);
+    if (magic === BIN_AUDIO_MAGIC) {
+      this.handleBinaryAudioPacket(buf);
+      return;
+    }
+    if (buf.byteLength <= BIN_VIDEO_HEADER_LEN || magic !== BIN_VIDEO_MAGIC) return;
 
     const isKey = (view.getUint8(1) & BIN_VIDEO_FLAG_KEY) !== 0;
     const pts = view.getUint32(4, true);
@@ -500,6 +560,12 @@ export class StreamPlayer {
         }
       } catch (_) {}
       this.videoDecoder = null;
+    }
+
+    if (this.audioCtx) {
+      this.audioCtx.close().catch(() => {});
+      this.audioCtx = null;
+      this.audioGain = null;
     }
 
     if (this.pipVideo) {

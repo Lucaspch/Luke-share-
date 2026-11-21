@@ -1,0 +1,100 @@
+name: Build Quest 3S APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  build-quest-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK & NDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages, NDK & Ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          echo "ANDROID_PLATFORM=android-29" >> "$GITHUB_ENV"
+          echo "ANDROID_STL=c++_static" >> "$GITHUB_ENV"
+
+      - name: Setup Rust (aarch64-linux-android)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Initialize & Patch Android Project for Quest 3S
+        run: |
+          npx tauri android init --ci --skip-targets-install
+          node quest-android/patch-android-project.mjs
+
+      - name: Build Quest 3S APK (ARM64)
+        run: npx tauri android build --apk --target aarch64 --ci
+
+      - name: Align & Sign Quest 3S APK
+        run: |
+          RAW_APK=$(find src-tauri/gen/android/app/build/outputs/apk -type f -name "*release*.apk" | head -n 1)
+          echo "Found APK: $RAW_APK"
+          test -n "$RAW_APK"
+
+          KEYSTORE_PATH="/tmp/luke-quest-release.jks"
+          keytool -genkeypair -v \
+            -keystore "$KEYSTORE_PATH" \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -alias lukeshare \
+            -storepass lukesharequest \
+            -keypass lukesharequest \
+            -dname "CN=Luke-Share, OU=VR, O=Luke-Share, L=BR, S=BR, C=BR"
+
+          "${ANDROID_HOME}/build-tools/35.0.0/zipalign" -f -p 4 "$RAW_APK" aligned.apk
+          "${ANDROID_HOME}/build-tools/35.0.0/apksigner" sign \
+            --ks "$KEYSTORE_PATH" \
+            --ks-key-alias lukeshare \
+            --ks-pass pass:lukesharequest \
+            --key-pass pass:lukesharequest \
+            --out Luke-Share_1.0.0_Quest3S.apk \
+            aligned.apk
+          ls -lh Luke-Share_1.0.0_Quest3S.apk
+
+      - name: Upload Quest 3S APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Luke-Share_1.0.0_Quest3S.apk
+          path: Luke-Share_1.0.0_Quest3S.apk
+
+      - name: Attach APK to GitHub Release v1.0.0
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v1.0.0 >/dev/null 2>&1; then
+            gh release upload v1.0.0 Luke-Share_1.0.0_Quest3S.apk --clobber
+          else
+            echo "Release v1.0.0 não encontrada; artifact disponível no workflow."
+          fi

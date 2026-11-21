@@ -1,13 +1,21 @@
 //! Windows Graphics Capture (WGC): captura de monitor (HMONITOR) ou janela (HWND).
 //! Cada frame é copiado (GPU→GPU) para uma textura própria de um anel e enviado por canal.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
-use crossbeam_channel::Sender;
-use parking_lot::Mutex;
-use windows::core::{IInspectable, Interface};
+
+#[cfg(windows)]
+pub use win_wgc::*;
+
+#[cfg(windows)]
+mod win_wgc {
+    use super::super::sources::SourceInfo;
+    use crate::video::d3d::Gpu;
+    use anyhow::{anyhow, Context, Result};
+    use crossbeam_channel::Sender;
+    use parking_lot::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use windows::core::{IInspectable, Interface};
 use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::*;
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
@@ -21,9 +29,6 @@ use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::Win32::System::WinRT::Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess};
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
-
-use super::sources::SourceInfo;
-use crate::video::d3d::Gpu;
 
 pub struct Frame {
     pub texture: ID3D11Texture2D,
@@ -198,5 +203,44 @@ impl Drop for WgcCapture {
         let _ = self.item.RemoveClosed(self.closed_token);
         let _ = self.session.Close();
         let _ = self.pool.Close();
+    }
+}
+}
+
+#[cfg(not(windows))]
+pub use non_win_wgc::*;
+
+#[cfg(not(windows))]
+mod non_win_wgc {
+    use super::super::sources::SourceInfo;
+    use crate::video::d3d::Gpu;
+    use anyhow::Result;
+    use crossbeam_channel::Sender;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    pub struct Frame {
+        pub texture: (),
+        pub width: u32,
+        pub height: u32,
+        pub pts_100ns: i64,
+    }
+
+    pub struct WgcCapture {
+        pub closed: Arc<AtomicBool>,
+        pub initial_size: (u32, u32),
+    }
+
+    impl WgcCapture {
+        pub fn start(_gpu: &Gpu, src: &SourceInfo, _fps: u32, _tx: Sender<Frame>) -> Result<Self> {
+            let initial_size = match src {
+                SourceInfo::Monitor { width, height, .. } => (*width, *height),
+                SourceInfo::Window { .. } => (1920, 1080),
+            };
+            Ok(Self {
+                closed: Arc::new(AtomicBool::new(false)),
+                initial_size,
+            })
+        }
     }
 }

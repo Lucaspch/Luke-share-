@@ -693,7 +693,12 @@ impl ReceiverPipeline {
         tracing::info!("receiver_p2p: conexão P2P estabelecida com sucesso!");
 
         let audio_player = if enable_native_audio {
-            Some(Arc::new(NativeAudioPlayer::start()))
+            let ap = Arc::new(NativeAudioPlayer::start());
+            let sink_audio = event_sink.clone();
+            ap.set_ipc_sink(Arc::new(move |samples| {
+                sink_audio(StreamEvent::AudioBin { samples });
+            }));
+            Some(ap)
         } else {
             None
         };

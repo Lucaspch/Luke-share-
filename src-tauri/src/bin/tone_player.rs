@@ -1,3 +1,6 @@
+#![allow(unused)]
+#[cfg(windows)]
+mod win_bin {
 //! Toca um tom senoidal via WASAPI (shared, render) por N segundos.
 //! Uso: tone_player <freq_hz> <segundos>
 //! Para testar a exclusão: copie este .exe como `Discord.exe` (ou outro nome da lista).
@@ -5,7 +8,7 @@
 use windows::Win32::Media::Audio::*;
 use windows::Win32::System::Com::*;
 
-fn main() -> windows::core::Result<()> {
+pub fn main() -> windows::core::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let freq: f32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(440.0);
     let secs: f32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10.0);
@@ -50,3 +53,13 @@ fn main() -> windows::core::Result<()> {
     }
     Ok(())
 }
+
+}
+
+#[cfg(windows)]
+fn main() -> anyhow::Result<()> {
+    win_bin::main().map_err(|e| anyhow::anyhow!("{e:?}"))
+}
+
+#[cfg(not(windows))]
+fn main() {}

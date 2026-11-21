@@ -1,21 +1,7 @@
 //! Enumeração e captura nativa de Webcam no Windows via Media Foundation (`IMFSourceReader`).
 //! Entrega frames diretamente como `ID3D11Texture2D` (BGRA) para reaproveitar todo o pipeline GPU (`Scaler` -> `H264Encoder`).
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::thread::JoinHandle;
-use std::time::Instant;
-
-use anyhow::{Context, Result};
-use crossbeam_channel::Sender;
 use serde::{Deserialize, Serialize};
-use windows::Win32::Graphics::Direct3D11::*;
-use windows::Win32::Graphics::Dxgi::Common::*;
-use windows::Win32::Media::MediaFoundation::*;
-use windows::Win32::System::Com::*;
-
-use crate::capture::wgc::Frame;
-use crate::video::d3d::Gpu;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct CameraDeviceInfo {
@@ -26,7 +12,26 @@ pub struct CameraDeviceInfo {
     pub fps: u32,
 }
 
-fn ensure_mf_started() -> Result<()> {
+#[cfg(windows)]
+pub use win_cam::*;
+
+#[cfg(windows)]
+mod win_cam {
+    use super::CameraDeviceInfo;
+    use crate::capture::wgc::Frame;
+    use crate::video::d3d::Gpu;
+    use anyhow::{Context, Result};
+    use crossbeam_channel::Sender;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread::JoinHandle;
+    use std::time::Instant;
+    use windows::Win32::Graphics::Direct3D11::*;
+    use windows::Win32::Graphics::Dxgi::Common::*;
+    use windows::Win32::Media::MediaFoundation::*;
+    use windows::Win32::System::Com::*;
+
+    fn ensure_mf_started() -> Result<()> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         MFStartup(MF_VERSION, MFSTARTUP_LITE).context("MFStartup falhou")?;
@@ -424,6 +429,38 @@ impl Drop for CameraCapture {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
+        }
+    }
+}
+}
+
+#[cfg(not(windows))]
+pub use non_win_cam::*;
+
+#[cfg(not(windows))]
+mod non_win_cam {
+    use super::CameraDeviceInfo;
+    use crate::capture::wgc::Frame;
+    use crate::video::d3d::Gpu;
+    use anyhow::{anyhow, Result};
+    use crossbeam_channel::Sender;
+
+    pub fn list_cameras() -> Vec<CameraDeviceInfo> {
+        Vec::new()
+    }
+
+    pub struct CameraCapture {
+        pub initial_size: (u32, u32),
+    }
+
+    impl CameraCapture {
+        pub fn start(
+            _gpu: &Gpu,
+            _cam: &CameraDeviceInfo,
+            _fps: u32,
+            _tx: Sender<Frame>,
+        ) -> Result<Self> {
+            Err(anyhow!("Captura de webcam física ainda não disponível no Quest/Android."))
         }
     }
 }

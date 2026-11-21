@@ -148,11 +148,23 @@ pub struct KnockResult {
 }
 
 pub(crate) fn get_data_dir() -> Result<PathBuf> {
-    let base = std::env::var("APPDATA")
-        .or_else(|_| std::env::var("LOCALAPPDATA"))
-        .context("Variável APPDATA não encontrada")?;
-    let mut dir = PathBuf::from(base);
-    dir.push("Luke-Share");
+    let dir = if let Ok(base) = std::env::var("APPDATA").or_else(|_| std::env::var("LOCALAPPDATA")) {
+        let mut p = PathBuf::from(base);
+        p.push("Luke-Share");
+        p
+    } else {
+        let android_roots = [
+            PathBuf::from("/data/user/0/dev.lukeshare.stream"),
+            PathBuf::from("/data/data/dev.lukeshare.stream"),
+        ];
+        if let Some(root) = android_roots.into_iter().find(|r| r.exists()) {
+            root.join("files").join("Luke-Share")
+        } else if let Ok(home) = std::env::var("HOME") {
+            PathBuf::from(home).join(".local").join("share").join("Luke-Share")
+        } else {
+            std::env::temp_dir().join("Luke-Share")
+        }
+    };
     fs::create_dir_all(&dir)?;
     Ok(dir)
 }

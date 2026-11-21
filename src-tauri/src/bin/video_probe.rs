@@ -1,3 +1,6 @@
+#![allow(unused)]
+#[cfg(windows)]
+mod win_bin {
 //! Sonda de vídeo: testa enumeração de fontes, WGC, D3D11 Scaler e MFT H.264.
 //!
 //! Uso:
@@ -20,7 +23,7 @@ fn arg(args: &[String], key: &str) -> Option<String> {
     args.iter().position(|a| a == key).and_then(|i| args.get(i + 1).cloned())
 }
 
-fn main() -> anyhow::Result<()> {
+pub fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let gpu = Gpu::new()?;
     println!("GPU: {}", gpu.adapter_name());
@@ -168,3 +171,13 @@ fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+}
+
+#[cfg(windows)]
+fn main() -> anyhow::Result<()> {
+    win_bin::main().map_err(|e| anyhow::anyhow!("{e:?}"))
+}
+
+#[cfg(not(windows))]
+fn main() {}

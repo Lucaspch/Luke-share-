@@ -1,5 +1,8 @@
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use tauri::Emitter;
+use tauri::AppHandle;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tauri_plugin_updater::UpdaterExt;
 
 #[derive(Debug, Clone, Serialize)]
@@ -18,6 +21,7 @@ pub struct DownloadProgress {
     pub total: Option<u64>,
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// Checa se há atualização disponível no repositório configurado
 #[tauri::command]
 pub async fn check_for_updates(app: AppHandle) -> Result<UpdateInfo, String> {
@@ -52,6 +56,7 @@ pub async fn check_for_updates(app: AppHandle) -> Result<UpdateInfo, String> {
     }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// Baixa e instala a atualização mais recente, emitindo eventos de progresso
 #[tauri::command]
 pub async fn download_and_install_update(app: AppHandle) -> Result<(), String> {
@@ -97,8 +102,31 @@ pub async fn download_and_install_update(app: AppHandle) -> Result<(), String> {
     }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 /// Reinicia a aplicação para aplicar a atualização instalada
 #[tauri::command]
 pub fn restart_app(app: AppHandle) {
     app.restart();
 }
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub async fn check_for_updates(app: AppHandle) -> Result<UpdateInfo, String> {
+    Ok(UpdateInfo {
+        available: false,
+        current_version: app.package_info().version.to_string(),
+        version: None,
+        date: None,
+        body: None,
+    })
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub async fn download_and_install_update(_app: AppHandle) -> Result<(), String> {
+    Err("Atualizações automáticas in-app não são suportadas no Android/Quest. Baixe o novo APK pelo GitHub Releases.".into())
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+pub fn restart_app(_app: AppHandle) {}

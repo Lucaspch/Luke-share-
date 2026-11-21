@@ -104,7 +104,8 @@ Escolha o formato de sua preferência nos [**Releases do GitHub**](https://githu
 | Formato | Arquivo | Indicado para |
 | :--- | :--- | :--- |
 | **Instalador Oficial** *(Recomendado)* | `Luke-Share_<versao>_x64-setup.exe` | Instalação padrão no Windows com **atualização automática** integrada. |
-| **Pacote Portátil** | `Luke-Share-v<versao>-Windows.zip` | Extrair em qualquer pasta e abrir `Luke-Share.exe` sem instalar nada. |
+| **Pacote Portátil (Windows)** | `Luke-Share-v<versao>-Windows.zip` | Extrair em qualquer pasta e abrir `Luke-Share.exe` sem instalar nada. |
+| **Meta Quest 3S / VR (Android ARM64)** | `Luke-Share_1.0.0_Quest3S.apk` | Instalar via SideQuest / ADB para transmitir em **1 única tela** e assistir lives no VR. |
 
 <details>
 <summary>Sobre o aviso do Windows SmartScreen na primeira execução</summary>
@@ -128,6 +129,12 @@ Como o projeto ainda não utiliza certificado pago de assinatura EV comercial, o
 2. Clique em uma sala (como **`# Geral`** ou crie novas salas como `# Jogos` ou `# Cine`). Quem entrar depois assiste automaticamente todas as telas e webcams ativas naquela sala.
 3. Use os botões da barra inferior para ligar/trocar o compartilhamento de **Tela** ou ativar sua **Webcam** (apenas vídeo, sem microfone).
 4. Para voltar às transmissões privadas por código/pedido, clique no ícone **Privado** no topo esquerdo.
+
+### 3. Meta Quest 3S / VR (1 Tela — Sem Visão Dupla)
+1. Baixe `Luke-Share_1.0.0_Quest3S.apk` na página de [**Releases**](https://github.com/Lucaspch/Luke-share-/releases/latest) e instale no Quest 3S via **SideQuest** ou via cabo/Wi-Fi (`adb install -r Luke-Share_1.0.0_Quest3S.apk`).
+2. Abra o **Luke-Share** na aba **Origens Desconhecidas** (*Unknown Sources*) dentro do Horizon OS — ele abre como painel 2D flutuante em VR ou no *Passthrough*.
+3. **Assistir no VR:** Cole um código `LK-XXXX-XXXX` ou entre em uma sala de **Grupo** para assistir às telas dos amigos no PC com áudio estéreo e vídeo por hardware.
+4. **Transmitir do Quest 3S para amigos (1 Tela):** Escolha o modo **Visão VR — 1 Tela (Olho Único Auto)** (ou force Olho Esquerdo / Olho Direito / Painel 2D), clique em **Iniciar Transmissão**, aceite a captura de tela do Horizon OS e volte normalmente para o seu jogo VR — o renderizador OpenGL recorta automaticamente para **1 única tela 16:9** (sem duplicar os 2 olhos lado a lado) e envia o som do jogo sem gerar eco.
 
 ### Controles no Palco Multi-Stream
 
