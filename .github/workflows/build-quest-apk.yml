@@ -28,15 +28,21 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Setup Android SDK & NDK
-        uses: android-actions/setup-android@v3
-
       - name: Install Android SDK packages, NDK & Ninja
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          CMDLINE_BIN=$(find "$ANDROID_HOME/cmdline-tools" -type f -name "sdkmanager" | sort | tail -n 1 | xargs dirname)
+          export PATH="$CMDLINE_BIN:$PATH"
+          echo "$CMDLINE_BIN" >> "$GITHUB_PATH"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager "platforms;android-36" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+
           echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/27.0.12077973" >> "$GITHUB_ENV"
           echo "NDK_HOME=${ANDROID_HOME}/ndk/27.0.12077973" >> "$GITHUB_ENV"
           echo "ANDROID_PLATFORM=android-29" >> "$GITHUB_ENV"
@@ -60,6 +66,7 @@ jobs:
 
       - name: Align & Sign Quest 3S APK
         run: |
+          find src-tauri/gen/android/app/build/outputs/apk -type f -name "*.apk" || true
           RAW_APK=$(find src-tauri/gen/android/app/build/outputs/apk -type f -name "*release*.apk" | head -n 1)
           echo "Found APK: $RAW_APK"
           test -n "$RAW_APK"
